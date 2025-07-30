@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: subito-checkerbot
-    env: python
-    region: frankfurt
-    plan: free
-    buildCommand: ""
-    startCommand: "python subito_checkerbot.py"
