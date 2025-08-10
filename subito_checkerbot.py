@@ -606,7 +606,7 @@ def main():
                 continue
 
             for c in soup.find_all("div", class_=re.compile("item-card")):
-                    print("📄 Annuncio trovato in HTML")
+                print("📄 Annuncio trovato in HTML")
                 href = c.find("a", href=True)["href"]
                 link = href if href.startswith("http") else "https://www.subito.it" + href
                 link = link.rstrip("/")  # rimuove eventuale slash finale
