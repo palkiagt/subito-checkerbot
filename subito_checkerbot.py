@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+
+
 import os, time, json, re, requests
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -7,6 +9,35 @@ from telegram.error import TelegramError
 from telegram.ext import Updater, CallbackQueryHandler, Dispatcher
 from hashlib import md5
 LINK_MAP = {}
+
+import re, time
+from playwright.sync_api import sync_playwright
+
+# Clicca il banner cookie se appare
+def _click_cookies(page):
+    for pat in [r"Accetta.*tutti", r"Accetta", r"Consenti", r"OK", r"Accept"]:
+        try:
+            page.get_by_role("button", name=re.compile(pat, re.I)).click(timeout=1500)
+            return
+        except:
+            pass
+    try:
+        page.locator("button:has-text('Accetta')").first.click(timeout=1500)
+    except:
+        pass
+
+# Apre la pagina come un browser e restituisce l'HTML
+def fetch_html_browser(url: str, wait_ms: int = 2500) -> str:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        ctx = browser.new_context(locale="it-IT", timezone_id="Europe/Rome")
+        page = ctx.new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        _click_cookies(page)
+        page.wait_for_timeout(wait_ms)  # tempo per caricare gli annunci via JS
+        html = page.content()
+        browser.close()
+        return html
 
 # 📌 CONFIGURAZIONE
 TOKEN = "8043365763:AAHHhiiC-KdvvzGIU7P4nikEJhvuUVG8aKk"
@@ -565,15 +596,17 @@ def main():
                 continue
             found = 0
             print(f"\n📦 {datetime.now().strftime('%d/%m %H:%M')} • Ricerca: {s['label']}")
+            print(f"🔍 URL: {s['url']}")
 
             try:
-                resp = requests.get(s["url"], headers={"User-Agent": "Mozilla/5.0"})
-                soup = BeautifulSoup(resp.text, "html.parser")
+                html = fetch_html_browser(s["url"], wait_ms=3000)
+                soup = BeautifulSoup(html, "lxml")
             except Exception as e:
                 print(f"🌐 Errore nella richiesta: {e}")
                 continue
 
             for c in soup.find_all("div", class_=re.compile("item-card")):
+                    print("📄 Annuncio trovato in HTML")
                 href = c.find("a", href=True)["href"]
                 link = href if href.startswith("http") else "https://www.subito.it" + href
                 link = link.rstrip("/")  # rimuove eventuale slash finale
@@ -663,5 +696,4 @@ def handle_start(update, context):
 
 if __name__ == "__main__":
     main()
-
 
