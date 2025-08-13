@@ -52,10 +52,12 @@ def fetch_html_browser(url: str, wait_ms: int = 2500, scrolls: int = 0) -> str:
         return html
 
 # 📌 CONFIGURAZIONE
-TOKEN = "8043365763:AAHHhiiC-KdvvzGIU7P4nikEJhvuUVG8aKk"
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+if not TOKEN:
+    raise SystemExit("❌ Variabile d'ambiente TELEGRAM_TOKEN non impostata. Vedi istruzioni.")
+BOT = Bot(TOKEN)
 CHAT_ID = -4737634103
 GROUP_ID = -4976140202
-BOT = Bot(TOKEN)
 
 
 DATABASE = "seen.json"
@@ -626,15 +628,17 @@ def dash_filter(update, context):
 all_ann = []
 
 def clear_dashboard(update, context):
-    count = 0
-    for msg_id in last_dash_msg_ids:
+    global last_dash_msg_id
+    if last_dash_msg_id:
         try:
-            BOT.delete_message(GROUP_ID, msg_id)
-            count += 1
-        except:
-            pass
-    last_dash_msg_ids.clear()
-    BOT.send_message(update.effective_chat.id, f"🧹 Dashboard pulita! ({count} messaggi eliminati)")
+            BOT.delete_message(GROUP_ID, last_dash_msg_id)
+            last_dash_msg_id = None
+            BOT.send_message(update.effective_chat.id, "🧹 Dashboard pulita!")
+        except Exception as e:
+            BOT.send_message(update.effective_chat.id, f"⚠️ Non sono riuscito a cancellare la dashboard: {e}")
+    else:
+        BOT.send_message(update.effective_chat.id, "ℹ️ Nessuna dashboard da pulire.")
+
 #/salvati → mostra i preferiti
 #/caldi → mostra i più caldi
 #/valutare → da valutare
@@ -668,6 +672,7 @@ def main():
         for s in SEARCHES:
             if not s.get("enabled", True):
                 continue
+       
             found = 0
             print(f"\n📦 {datetime.now().strftime('%d/%m %H:%M')} • Ricerca: {s['label']}")
             print(f"🔍 URL: {s['url']}")
@@ -691,50 +696,54 @@ def main():
                         links.add(href)
 
                 links = list(links)
-print("DEBUG: link trovati =", len(links))
+                print("DEBUG: link trovati =", len(links))
+              
+                # Usa i link trovati: estrai, applica filtri e invia
+                for link in links:
+                    # salta duplicati/scartati
+                    if link in seen or link in discarded:
+                        continue
+                    try:
+                        price, cond, city, date, likes, details, imgs, model, venduto = extract(link)
 
-# Usa i link trovati: estrai, applica filtri e invia
-found = 0
-for link in links:
-    # salta duplicati/scartati
-    if link in seen or link in discarded:
-        continue
-    try:
-        price, cond, city, date, likes, details, imgs, model, venduto = extract(link)
+                        # === FILTRI ===
+                        # match modello: se vuoi tenerlo stretto lascia uguale, altrimenti allenta
+                        if s["label"].lower() != model.lower():
+                            # alternativa meno rigida:
+                            # if s["label"].split()[1].lower() not in model.lower():
+                            #     continue
+                            continue
 
-        # === FILTRI ===
-        # match modello: se vuoi tenerlo stretto lascia uguale, altrimenti allenta
-        if s["label"].lower() != model.lower():
-            # alternativa meno rigida:
-            # if s["label"].split()[1].lower() not in model.lower():
-            #     continue
-            continue
+                        parsed = parse_date(date)
+                        if parsed and (datetime.now() - parsed).days > 2:
+                            continue
 
-        parsed = parse_date(date)
-        if parsed and (datetime.now() - parsed).days > 2:
-            continue
+                        if not (s["min"] <= price <= s["max"]):
+                            continue
+      
+                        # === Se valido, invia ===
+                        seen.add(link)
+                        found += 1
+                        if not any(a["link"] == link for a in all_ann):
+                            all_ann.append({
+                                "label": model,
+                                "price": price,
+                                "city": city,
+                                "link": link,
+                                "likes": likes
+                            })
 
-        if not (s["min"] <= price <= s["max"]):
-            continue
+                        send_announcement(
+                            (price, cond, city, date, likes, details, imgs, model, venduto),
+                            link
+                        )
+                        time.sleep(2)
 
-        # === Se valido, invia ===
-        seen.add(link)
-        found += 1
-        if not any(a["link"] == link for a in all_ann):
-            all_ann.append({"label": model, "price": price, "city": city, "link": link, "likes": likes})
+                    except Exception as e:
+                        print("❌ Errore annuncio:", link, "|", e)
 
-        send_announcement(
-            (price, cond, city, date, likes, details, imgs, model, venduto),
-            link
-        )
-        time.sleep(2)
-
-    except Exception as e:
-        print("❌ Errore annuncio:", link, "|", e)
-
-
-
-                
+            except Exception as e:
+                print("❌ Errore lista:", e)
 
             if found:
                 print(f"✅ Trovati: {found} annunci validi")
