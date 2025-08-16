@@ -33,7 +33,7 @@ def _click_cookies(page):
 # Apre la pagina come un browser e restituisce l'HTML
 def fetch_html_browser(url: str, wait_ms: int = 2500, scrolls: int = 0) -> str:
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)  # True in produzione
+        browser = p.chromium.launch(headless=True)  # True in produzione
         ctx = browser.new_context(locale="it-IT", timezone_id="Europe/Rome")
         page = ctx.new_page()
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
