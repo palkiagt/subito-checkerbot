@@ -19,79 +19,109 @@ from playwright.sync_api import sync_playwright
 
 # Clicca il banner cookie se appare
 def _click_cookies(page):
-    for pat in [r"Accetta.*tutti", r"Accetta", r"Consenti", r"OK", r"Accept", r"Rifiuta.*tutti", r"Gestisci"]:
+    patterns = [
+        r"Accetta.*tutti", r"Accetta", r"Consenti", r"OK", r"Accept",
+        r"Rifiuta.*non necessario", r"Continua.*senza accettare"
+    ]
+    # prova bottoni per ruolo/nome
+    for pat in patterns:
         try:
             page.get_by_role("button", name=re.compile(pat, re.I)).click(timeout=1200)
-            page.wait_for_timeout(250)
+            page.wait_for_timeout(300)
+            return
         except:
             pass
-    try:
-        page.locator("button:has-text('Accetta')").first.click(timeout=1200)
-        page.wait_for_timeout(250)
-    except:
-        pass
+    # fallback CSS comuni
+    for sel in [
+        "button:has-text('Accetta')",
+        "button:has-text('Consenti')",
+        "button:has-text('OK')",
+        "[data-testid*=cookie] button",
+        "[id*='consent'] button",
+    ]:
+        try:
+            page.locator(sel).first.click(timeout=1200)
+            page.wait_for_timeout(300)
+            return
+        except:
+            pass
 
-def fetch_html_browser(url: str, wait_ms: int = 3500, scrolls: int = 6) -> str:
-    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+def fetch_html_browser(url: str, wait_ms: int = 2500, scrolls: int = 0) -> str:
+    from playwright.sync_api import sync_playwright
+    import pathlib, time, re
+
+    debug_dir = pathlib.Path("/tmp/subito-debug")
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    ts = int(time.time())
+
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
             args=[
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
+                "--disable-gpu",
                 "--disable-blink-features=AutomationControlled",
-                "--disable-features=IsolateOrigins,site-per-process",
             ],
         )
         ctx = browser.new_context(
             locale="it-IT",
             timezone_id="Europe/Rome",
-            user_agent=ua,
-            viewport={"width": 1366, "height": 768},
-            device_scale_factor=1.0,
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
             extra_http_headers={
                 "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Upgrade-Insecure-Requests": "1",
+                "Referer": "https://www.google.com/",
             },
+            viewport={"width": 1366, "height": 900},
         )
         page = ctx.new_page()
 
-        # riduci tracce di automation
-        page.add_init_script("""() => {
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            const proto = navigator.permissions.__proto__;
-            if (proto && proto.query) {
-              const orig = proto.query;
-              proto.query = function (parameters) {
-                if (parameters && parameters.name === 'notifications') {
-                  return Promise.resolve({ state: Notification.permission });
-                }
-                return orig.call(this, parameters);
-              };
-            }
-        }""")
-
-        page.goto(url, wait_until="load", timeout=60000)
-        page.wait_for_load_state("networkidle")
-        _click_cookies(page)
-        page.wait_for_timeout(wait_ms)
-
-        # scroll aggressivo per innescare lazy-load
-        for _ in range(scrolls):
-            page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-            page.wait_for_timeout(1000)
-
-        # attendi che compaiano le card/link
         try:
-            page.wait_for_selector("a[href*='/annunci/']", timeout=5000)
-        except:
-            pass
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-        html = page.content()
-        ctx.close()
-        browser.close()
-        return html
+            _click_cookies(page)
+
+            page.wait_for_timeout(wait_ms)
+
+            for _ in range(max(3, scrolls or 0)):
+                page.mouse.wheel(0, 2500)
+                page.wait_for_timeout(900)
+
+            # prova a far comparire le card: aspetta ancore verso /annunci/
+            try:
+                page.wait_for_selector("a[href*='/annunci/']", timeout=4000)
+            except:
+                pass
+
+            # fallback: un altro po’ di scroll
+            if not page.locator("a[href*='/annunci/']").count():
+                for _ in range(4):
+                    page.mouse.wheel(0, 3000)
+                    page.wait_for_timeout(700)
+
+            html = page.content()
+
+            # DEBUG: se ancora niente, salva screenshot e html
+            if page.locator("a[href*='/annunci/']").count() == 0:
+                shot = debug_dir / f"list_{ts}.png"
+                dump = debug_dir / f"list_{ts}.html"
+                try:
+                    page.screenshot(path=str(shot), full_page=True)
+                except:
+                    pass
+                try:
+                    dump.write_text(html, encoding="utf-8")
+                except:
+                    pass
+                print(f"DEBUG: nessun anchor, salvato {shot} e {dump}")
+
+            return html
+        finally:
+            ctx.close()
+            browser.close()
       
 # 📌 CONFIGURAZIONE
 TOKEN = os.getenv("TELEGRAM_TOKEN")
