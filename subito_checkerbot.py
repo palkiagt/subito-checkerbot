@@ -19,19 +19,21 @@ from playwright.sync_api import sync_playwright
 
 # Clicca il banner cookie se appare
 def _click_cookies(page):
-    for pat in [r"Accetta.*tutti", r"Accetta", r"Consenti", r"OK", r"Accept"]:
+    for pat in [r"Accetta.*tutti", r"Accetta", r"Consenti", r"OK", r"Accept", r"Rifiuta.*tutti", r"Gestisci"]:
         try:
-            page.get_by_role("button", name=re.compile(pat, re.I)).click(timeout=1500)
-            return
+            page.get_by_role("button", name=re.compile(pat, re.I)).click(timeout=1200)
+            page.wait_for_timeout(250)
         except:
             pass
     try:
-        page.locator("button:has-text('Accetta')").first.click(timeout=1500)
+        page.locator("button:has-text('Accetta')").first.click(timeout=1200)
+        page.wait_for_timeout(250)
     except:
         pass
 
-def fetch_html_browser(url: str, wait_ms: int = 2500, scrolls: int = 0) -> str:
-    from datetime import datetime
+def fetch_html_browser(url: str, wait_ms: int = 3500, scrolls: int = 6) -> str:
+    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -39,84 +41,56 @@ def fetch_html_browser(url: str, wait_ms: int = 2500, scrolls: int = 0) -> str:
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
             ],
         )
-        ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
         ctx = browser.new_context(
             locale="it-IT",
             timezone_id="Europe/Rome",
             user_agent=ua,
-            viewport={"width": 1366, "height": 900},
+            viewport={"width": 1366, "height": 768},
+            device_scale_factor=1.0,
+            extra_http_headers={
+                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Upgrade-Insecure-Requests": "1",
+            },
         )
-        # Rimuove navigator.webdriver
-        ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
         page = ctx.new_page()
 
-        # Vai alla pagina e attendi rete “ferma”
-        page.goto(url, wait_until="networkidle", timeout=60000)
+        # riduci tracce di automation
+        page.add_init_script("""() => {
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            const proto = navigator.permissions.__proto__;
+            if (proto && proto.query) {
+              const orig = proto.query;
+              proto.query = function (parameters) {
+                if (parameters && parameters.name === 'notifications') {
+                  return Promise.resolve({ state: Notification.permission });
+                }
+                return orig.call(this, parameters);
+              };
+            }
+        }""")
 
-        # Cookie banner: prova diversi selettori/testi
-        def try_click():
-            for sel in [
-                "button:has-text('Accetta')",
-                "button:has-text('Accetta tutti')",
-                "button:has-text('Consenti')",
-                "button:has-text('OK')",
-                "[aria-label*='Accetta']",
-            ]:
-                try:
-                    page.locator(sel).first.click(timeout=1500)
-                    return True
-                except:
-                    pass
-            for pat in [r"Accetta.*tutti", r"Accetta", r"Consenti", r"OK", r"Accept"]:
-                try:
-                    page.get_by_role("button", name=re.compile(pat, re.I)).click(timeout=1500)
-                    return True
-                except:
-                    pass
-            return False
-
-        try_click()
+        page.goto(url, wait_until="load", timeout=60000)
+        page.wait_for_load_state("networkidle")
+        _click_cookies(page)
         page.wait_for_timeout(wait_ms)
 
-        # Scroll progressivo fino a quando non aumenta l'altezza
-        last_height = 0
-        same_count = 0
-        for _ in range(15):  # max 15 step
+        # scroll aggressivo per innescare lazy-load
+        for _ in range(scrolls):
             page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-            page.wait_for_timeout(1200)
-            h = page.evaluate("document.body.scrollHeight")
-            if h <= last_height:
-                same_count += 1
-            else:
-                same_count = 0
-                last_height = h
-            if same_count >= 2:
-                break
+            page.wait_for_timeout(1000)
 
-        # Se possibile, aspetta che compaia almeno un link di annuncio
+        # attendi che compaiano le card/link
         try:
-            page.wait_for_selector("a[href*='/annunci/']", timeout=8000)
+            page.wait_for_selector("a[href*='/annunci/']", timeout=5000)
         except:
             pass
 
         html = page.content()
         ctx.close()
         browser.close()
-
-        # Debug: se non ci sono link, salva HTML per ispezione
-        if "annunci" not in html:
-            path = f"/tmp/subito_debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(html)
-                print(f"[DEBUG] Salvato HTML di debug in: {path} (len={len(html)})")
-            except Exception as e:
-                print(f"[DEBUG] Non riesco a salvare HTML: {e}")
-
         return html
       
 # 📌 CONFIGURAZIONE
