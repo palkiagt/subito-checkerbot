@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+
+
 import os, time, json, re, requests
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -8,11 +10,54 @@ from telegram.ext import Updater, CallbackQueryHandler, Dispatcher
 from hashlib import md5
 LINK_MAP = {}
 
+import re, time
+from playwright.sync_api import sync_playwright
+
+import re
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
+
+# Clicca il banner cookie se appare
+def _click_cookies(page):
+    for pat in [r"Accetta.*tutti", r"Accetta", r"Consenti", r"OK", r"Accept"]:
+        try:
+            page.get_by_role("button", name=re.compile(pat, re.I)).click(timeout=1500)
+            return
+        except:
+            pass
+    try:
+        page.locator("button:has-text('Accetta')").first.click(timeout=1500)
+    except:
+        pass
+
+# Apre la pagina come un browser e restituisce l'HTML
+def fetch_html_browser(url: str, wait_ms: int = 2500, scrolls: int = 0) -> str:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)  # True in produzione
+        ctx = browser.new_context(locale="it-IT", timezone_id="Europe/Rome")
+        page = ctx.new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        _click_cookies(page)
+        page.wait_for_timeout(wait_ms)  # lascia tempo al JS
+
+        # scroll opzionale per far comparire più card
+        for _ in range(scrolls):
+            page.mouse.wheel(0, 2500)
+            page.wait_for_timeout(1200)
+
+        html = page.content()
+        # page.screenshot(path="shot_list.png", full_page=True)  # debug, opzionale
+        ctx.close()
+        browser.close()
+        return html
+
 # 📌 CONFIGURAZIONE
-TOKEN = "8043365763:AAHHhiiC-KdvvzGIU7P4nikEJhvuUVG8aKk"
-CHAT_ID = "385655299"
-GROUP_ID = -4976140202
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+if not TOKEN:
+    raise SystemExit("❌ Variabile d'ambiente TELEGRAM_TOKEN non impostata. Vedi istruzioni.")
 BOT = Bot(TOKEN)
+CHAT_ID = -4737634103
+GROUP_ID = -4976140202
 
 
 DATABASE = "seen.json"
@@ -244,41 +289,103 @@ def extract_title_model(soup):
     return " ".join(parts)
 
 def extract(link):
-    r = requests.get(link, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-    s = BeautifulSoup(r.text, "html.parser")
-    venduto = bool(s.find("span", class_=re.compile("item-sold-badge")))
-    price = int(re.search(r"(\d+)\s*€", s.find("p", class_=re.compile("index-module_price")).text).group(1))
-    feature_tags = s.find_all("span", class_=re.compile("feature-list_value"))
-    raw_cond = next((f.text.strip().lower() for f in feature_tags if "cellulari" not in f.text.lower()), "")
-    if any(k in raw_cond for k in ["dannegg", "guasto", "difettoso", "non funzion", "rotto"]):
+    """
+    Estrae i campi principali da una pagina annuncio Subito.
+    Ritorna: price, cond, city, date_txt, likes, details, imgs, label, venduto
+    """
+    # 1) Carica DETTAGLIO con Playwright (NON requests)
+    html_item = fetch_html_browser(link, wait_ms=2000)   # 2s sul dettaglio aiuta a popolare prezzo/testi
+    s = BeautifulSoup(html_item, "lxml")
+
+    # 2) Flag "venduto"
+    venduto = bool(
+        s.find(string=re.compile(r"\bvendut[oa]\b", re.I)) or
+        s.find(class_=re.compile(r"\bsold\b", re.I))
+    )
+
+    # 3) Prezzo (euristica robusta su tutto il testo)
+    full_text = " ".join(s.get_text(" ").split())
+    m_price = re.search(r"(\d{1,3}(?:[.\s]\d{3})*(?:,\d+)?|\d+(?:,\d+)?)\s*€", full_text)
+    if m_price:
+        raw = m_price.group(1).replace(" ", "").replace(".", "").replace(",", ".")
+        try:
+            price = int(float(raw))
+        except:
+            price = 0
+    else:
+        price = 0
+
+    # 4) Condizione (parole chiave frequenti)
+    lt = full_text.lower()
+    if any(k in lt for k in ["dannegg", "guasto", "difettoso", "non funzion", "rotto", "per pezzi"]):
         cond = "Danneggiato"
-    elif any(k in raw_cond for k in ["buono", "ottimo", "usato", "perfetto", "ben conservato", "funzionante"]):
+    elif any(k in lt for k in ["buono", "ottimo", "usato", "perfetto", "funzionante", "pari al nuovo", "come nuovo"]):
         cond = "Buono"
     else:
-        cond = "N/A"
-    city = s.find("p", class_=re.compile("AdInfo_locationText")).text.strip()
-    date = s.find("span", class_=re.compile("insertion-date")).text.strip()
-    parsed = parse_date(date)
-    if parsed and (datetime.now() - parsed).days > 2:
-        raise Exception("Annuncio troppo vecchio")
-    likes_tag = s.find("span", class_=re.compile("Heart_counter-wrapper"))
-    likes = likes_tag.text.strip() if likes_tag else "0"
-    desc = s.find("p", class_=re.compile("AdDescription_description")).text
-    details = []
-    for label, patterns in KEYWORDS.items():
-        for pattern in patterns:
-            match = re.search(pattern, desc, re.IGNORECASE)
-            if match:
-                if label == "Problema generico":
-                    snippet = match.group(0).strip()
-                    details.append(f"{label} ({snippet})")
-                else:
-                    details.append(label)
+        cond = "N/D"
+
+    # 5) Città (prendi un blocco plausibile: location)
+    city = ""
+    for sel in ["[class*='location']", "[data-testid*='location']", "div:has(span:matches('(?i)\\b\\w+\\b')) span", "p", "span"]:
+        el = s.select_one(sel)
+        if el:
+            txt = el.get_text(" ", strip=True)
+            # filtra stringhe troppo lunghe/noise
+            if txt and 2 <= len(txt) <= 60:
+                city = txt
                 break
 
-    imgs = [img["src"] for img in s.select("img.Carousel_image__dcaDx") if img.get("src")][:5]
-    label = extract_title_model(s)
-    return price, cond, city, date, likes, details, imgs, label or "iPhone", venduto
+    # 6) Data testuale (usa <time> o pattern tipo 'oggi/ieri' o '10 ago')
+    date_txt = ""
+    t = s.find("time")
+    if t and t.get_text(strip=True):
+        date_txt = t.get_text(strip=True)
+    else:
+        m_date = re.search(r"\b(oggi|ieri|\d{1,2}\s+[a-z]{3,})\b", full_text, re.I)
+        if m_date:
+            date_txt = m_date.group(1)
+
+    # 7) Likes/preferiti (se visibili)
+    likes = "0"
+    like_node = s.find(string=re.compile(r"(mi\s+piace|like|preferit[io])", re.I))
+    if like_node:
+        ln = like_node if isinstance(like_node, str) else like_node.get_text(" ")
+        m_like = re.search(r"(\d+)", ln)
+        if m_like:
+            likes = m_like.group(1)
+
+    # 8) Dettagli/keyword (opzionale: usa KEYWORDS se esiste nel tuo script)
+    details = []
+    try:
+        for label, patterns in KEYWORDS.items():  # KEYWORDS deve essere definito nel tuo file
+            for pattern in patterns:
+                if re.search(pattern, full_text, re.I):
+                    details.append(label)
+                    break
+    except NameError:
+        details = []  # Se non hai KEYWORDS, lascia vuoto
+
+    # 9) Immagini (prendi qualche src valido)
+    imgs = []
+    for img in s.find_all("img"):
+        src = (img.get("src") or "").strip()
+        if src.startswith("http"):
+            imgs.append(src)
+        if len(imgs) >= 5:
+            break
+
+    # 10) Label/modello (euristica semplice: dal <title> o h1/h2)
+    label = ""
+    title_el = s.find(["h1", "h2"]) or s.find("title")
+    if title_el:
+        label = title_el.get_text(" ", strip=True)
+    if not label:
+        # fallback: parole chiave tipiche
+        m_lbl = re.search(r"(iPhone\s?\d{1,2}\s?(Pro|Pro Max|Mini)?)", full_text, re.I)
+        label = m_lbl.group(1) if m_lbl else "iPhone"
+
+    return price, cond, city, date_txt, likes, details, imgs, label, venduto
+
 
 def send_announcement(data, link):
     price, cond, city, date, likes, details, imgs, label, venduto = data
@@ -521,15 +628,17 @@ def dash_filter(update, context):
 all_ann = []
 
 def clear_dashboard(update, context):
-    count = 0
-    for msg_id in last_dash_msg_ids:
+    global last_dash_msg_id
+    if last_dash_msg_id:
         try:
-            BOT.delete_message(GROUP_ID, msg_id)
-            count += 1
-        except:
-            pass
-    last_dash_msg_ids.clear()
-    BOT.send_message(update.effective_chat.id, f"🧹 Dashboard pulita! ({count} messaggi eliminati)")
+            BOT.delete_message(GROUP_ID, last_dash_msg_id)
+            last_dash_msg_id = None
+            BOT.send_message(update.effective_chat.id, "🧹 Dashboard pulita!")
+        except Exception as e:
+            BOT.send_message(update.effective_chat.id, f"⚠️ Non sono riuscito a cancellare la dashboard: {e}")
+    else:
+        BOT.send_message(update.effective_chat.id, "ℹ️ Nessuna dashboard da pulire.")
+
 #/salvati → mostra i preferiti
 #/caldi → mostra i più caldi
 #/valutare → da valutare
@@ -539,17 +648,32 @@ def clear_dashboard(update, context):
 
 def main():
     global last_dash
-    BOT.send_message(GROUP_ID, "✅ *ReBiz Bot attivo e monitoraggio avviato!* 📡", parse_mode="Markdown")
-    print("🚀 Bot attivo e in ascolto...")
-    from telegram.ext import MessageHandler, Filters
 
+    # Diagnostica avvio
+    try:
+        me = BOT.get_me()
+        print("BOT get_me():", me)
+    except Exception as e:
+        print("BOT get_me() FAILED:", e)
+        raise
+
+    for cid in (GROUP_ID, CHAT_ID):
+        try:
+            BOT.send_message(cid, "🟢 Avvio bot (ping semplice)")
+            print("OK send_message to", cid)
+        except Exception as e:
+            print("FAIL send_message to", cid, "->", repr(e))
+            raise
+
+    print("🚀 Bot attivo e in ascolto...")
+
+    from telegram.ext import MessageHandler, Filters, CommandHandler
     from threading import Thread
 
     updater = Updater(TOKEN, use_context=True)
     dispatcher: Dispatcher = updater.dispatcher
     dispatcher.add_handler(MessageHandler(Filters.text & Filters.regex(r"^/start discard_"), handle_start))
     dispatcher.add_handler(CallbackQueryHandler(button_handler))
-    from telegram.ext import CommandHandler
     dispatcher.add_handler(CommandHandler("reset", reset_data))
     dispatcher.add_handler(CommandHandler("recover", recover_discarded))
     dispatcher.add_handler(CommandHandler("salvati", dash_filter))
@@ -563,48 +687,68 @@ def main():
         for s in SEARCHES:
             if not s.get("enabled", True):
                 continue
+
             found = 0
             print(f"\n📦 {datetime.now().strftime('%d/%m %H:%M')} • Ricerca: {s['label']}")
+            print(f"🔍 URL: {s['url']}")
 
             try:
-                resp = requests.get(s["url"], headers={"User-Agent": "Mozilla/5.0"})
-                soup = BeautifulSoup(resp.text, "html.parser")
+                html = fetch_html_browser(s["url"], wait_ms=5000, scrolls=2)
+                soup = BeautifulSoup(html, "lxml")
+                print("DEBUG: anchor annunci =", len(soup.select("a[href*='/annunci/']")))
+
+                links = set()
+                for a in soup.select("a[href*='/annunci/']"):
+                    href = a.get("href")
+                    if not href:
+                        continue
+                    if not href.startswith("http"):
+                        href = "https://www.subito.it" + href
+                    href = href.split("?")[0].rstrip("/")
+                    if "/annunci/" in href and "/preferiti" not in href:
+                        links.add(href)
+
+                links = list(links)
+                print("DEBUG: link trovati =", len(links))
+
+                for link in links:
+                    if link in seen or link in discarded:
+                        continue
+                    try:
+                        price, cond, city, date, likes, details, imgs, model, venduto = extract(link)
+
+                        if s["label"].lower() != model.lower():
+                            continue
+
+                        parsed = parse_date(date)
+                        if parsed and (datetime.now() - parsed).days > 2:
+                            continue
+
+                        if not (s["min"] <= price <= s["max"]):
+                            continue
+
+                        seen.add(link)
+                        found += 1
+                        if not any(a["link"] == link for a in all_ann):
+                            all_ann.append({
+                                "label": model,
+                                "price": price,
+                                "city": city,
+                                "link": link,
+                                "likes": likes
+                            })
+
+                        send_announcement(
+                            (price, cond, city, date, likes, details, imgs, model, venduto),
+                            link
+                        )
+                        time.sleep(2)
+
+                    except Exception as e:
+                        print("❌ Errore annuncio:", link, "|", e)
+
             except Exception as e:
-                print(f"🌐 Errore nella richiesta: {e}")
-                continue
-
-            for c in soup.find_all("div", class_=re.compile("item-card")):
-                href = c.find("a", href=True)["href"]
-                link = href if href.startswith("http") else "https://www.subito.it" + href
-                link = link.rstrip("/")  # rimuove eventuale slash finale
-
-                if link in seen:
-                    continue
-                if link in discarded:
-                    continue
-
-                try:
-                    data = extract(link)
-                except Exception as e:
-                    print("❌ Errore parsing:", e)
-                    continue
-
-                price, cond, city, date, likes, details, imgs, model, venduto = data
-                if s["label"].lower() != model.lower():
-                    continue
-                parsed = parse_date(date)
-                if parsed and (datetime.now() - parsed).days > 2:
-                    continue
-                if not (s["min"] <= price <= s["max"]):
-                    continue
-
-                seen.add(link)
-                found += 1
-                if not any(a["link"] == link for a in all_ann):
-                    all_ann.append({"label": model, "price": price, "city": city, "link": link, "likes": likes})
-
-                send_announcement(data, link)
-                time.sleep(2)
+                print("❌ Errore lista:", e)
 
             if found:
                 print(f"✅ Trovati: {found} annunci validi")
@@ -663,5 +807,4 @@ def handle_start(update, context):
 
 if __name__ == "__main__":
     main()
-
 
