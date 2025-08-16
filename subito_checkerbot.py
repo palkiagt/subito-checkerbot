@@ -30,27 +30,95 @@ def _click_cookies(page):
     except:
         pass
 
-# Apre la pagina come un browser e restituisce l'HTML
 def fetch_html_browser(url: str, wait_ms: int = 2500, scrolls: int = 0) -> str:
+    from datetime import datetime
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)  # True in produzione
-        ctx = browser.new_context(locale="it-IT", timezone_id="Europe/Rome")
-        page = ctx.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        _click_cookies(page)
-        page.wait_for_timeout(wait_ms)  # lascia tempo al JS
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
+        ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+        ctx = browser.new_context(
+            locale="it-IT",
+            timezone_id="Europe/Rome",
+            user_agent=ua,
+            viewport={"width": 1366, "height": 900},
+        )
+        # Rimuove navigator.webdriver
+        ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-        # scroll opzionale per far comparire più card
-        for _ in range(scrolls):
-            page.mouse.wheel(0, 2500)
+        page = ctx.new_page()
+
+        # Vai alla pagina e attendi rete “ferma”
+        page.goto(url, wait_until="networkidle", timeout=60000)
+
+        # Cookie banner: prova diversi selettori/testi
+        def try_click():
+            for sel in [
+                "button:has-text('Accetta')",
+                "button:has-text('Accetta tutti')",
+                "button:has-text('Consenti')",
+                "button:has-text('OK')",
+                "[aria-label*='Accetta']",
+            ]:
+                try:
+                    page.locator(sel).first.click(timeout=1500)
+                    return True
+                except:
+                    pass
+            for pat in [r"Accetta.*tutti", r"Accetta", r"Consenti", r"OK", r"Accept"]:
+                try:
+                    page.get_by_role("button", name=re.compile(pat, re.I)).click(timeout=1500)
+                    return True
+                except:
+                    pass
+            return False
+
+        try_click()
+        page.wait_for_timeout(wait_ms)
+
+        # Scroll progressivo fino a quando non aumenta l'altezza
+        last_height = 0
+        same_count = 0
+        for _ in range(15):  # max 15 step
+            page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
             page.wait_for_timeout(1200)
+            h = page.evaluate("document.body.scrollHeight")
+            if h <= last_height:
+                same_count += 1
+            else:
+                same_count = 0
+                last_height = h
+            if same_count >= 2:
+                break
+
+        # Se possibile, aspetta che compaia almeno un link di annuncio
+        try:
+            page.wait_for_selector("a[href*='/annunci/']", timeout=8000)
+        except:
+            pass
 
         html = page.content()
-        # page.screenshot(path="shot_list.png", full_page=True)  # debug, opzionale
         ctx.close()
         browser.close()
-        return html
 
+        # Debug: se non ci sono link, salva HTML per ispezione
+        if "annunci" not in html:
+            path = f"/tmp/subito_debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(html)
+                print(f"[DEBUG] Salvato HTML di debug in: {path} (len={len(html)})")
+            except Exception as e:
+                print(f"[DEBUG] Non riesco a salvare HTML: {e}")
+
+        return html
+      
 # 📌 CONFIGURAZIONE
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
