@@ -46,82 +46,86 @@ def _click_cookies(page):
         except:
             pass
 
-def fetch_html_browser(url: str, wait_ms: int = 2500, scrolls: int = 0) -> str:
-    from playwright.sync_api import sync_playwright
-    import pathlib, time, re
-
-    debug_dir = pathlib.Path("/tmp/subito-debug")
-    debug_dir.mkdir(parents=True, exist_ok=True)
-    ts = int(time.time())
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
+def fetch_html_browser(url: str, wait_ms: int = 3000, scrolls: int = 2) -> str:
+    def _do_fetch(pw_browser_name: str) -> str:
+        b = getattr(p, pw_browser_name)
+        # Flag utili in VM
+        browser = b.launch(
             headless=True,
             args=[
                 "--no-sandbox",
+                "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-gpu",
                 "--disable-blink-features=AutomationControlled",
-            ],
+            ]
         )
         ctx = browser.new_context(
             locale="it-IT",
             timezone_id="Europe/Rome",
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            extra_http_headers={
-                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Referer": "https://www.google.com/",
-            },
-            viewport={"width": 1366, "height": 900},
+            user_agent=("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+            extra_http_headers={"Accept-Language": "it-IT,it;q=0.9,en;q=0.8"},
+            # JavaScript è abilitato di default, ma lo ribadiamo
+            java_script_enabled=True,
+            viewport={"width": 1280, "height": 2000},
         )
         page = ctx.new_page()
 
+        # Vai alla pagina e attendi che la rete si quieti un attimo
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        _click_cookies(page)
+
+        # Aspetta che compaiano elementi tipici dei risultati
+        # prima corto (2s), poi scroll+retry più lunghi
+        sel_card = "a[href*='/annunci/']"
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=60000)
-
-            _click_cookies(page)
-
-            page.wait_for_timeout(wait_ms)
-
-            for _ in range(max(3, scrolls or 0)):
+            page.wait_for_selector(sel_card, timeout=2000)
+        except:
+            # Scroll graduale per innescare il lazy-load
+            for _ in range(max(1, scrolls)):
                 page.mouse.wheel(0, 2500)
-                page.wait_for_timeout(900)
-
-            # prova a far comparire le card: aspetta ancore verso /annunci/
+                page.wait_for_timeout(800)
+            # Aspetta rete e selector
             try:
-                page.wait_for_selector("a[href*='/annunci/']", timeout=4000)
+                page.wait_for_load_state("networkidle", timeout=10000)
             except:
                 pass
+            try:
+                page.wait_for_selector(sel_card, timeout=5000)
+            except:
+                # ultimo tentativo: piccolo delay
+                page.wait_for_timeout(wait_ms)
 
-            # fallback: un altro po’ di scroll
-            if not page.locator("a[href*='/annunci/']").count():
-                for _ in range(4):
-                    page.mouse.wheel(0, 3000)
-                    page.wait_for_timeout(700)
+        html = page.content()
+        # DEBUG facoltativi (se vuoi tenerli)
+        try:
+            os.makedirs("/tmp/subito-debug", exist_ok=True)
+            ts = str(int(time.time()))
+            page.screenshot(path=f"/tmp/subito-debug/list_{ts}.png", full_page=True)
+            with open(f"/tmp/subito-debug/list_{ts}.html", "w") as f:
+                f.write(html)
+        except:
+            pass
 
-            html = page.content()
+        ctx.close()
+        browser.close()
+        return html
 
-            # DEBUG: se ancora niente, salva screenshot e html
-            if page.locator("a[href*='/annunci/']").count() == 0:
-                shot = debug_dir / f"list_{ts}.png"
-                dump = debug_dir / f"list_{ts}.html"
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        # 1° tentativo: chromium
+        try:
+            return _do_fetch("chromium")
+        except Exception as e1:
+            # 2° tentativo: webkit (spesso rende liste “ostiche”)
+            try:
+                return _do_fetch("webkit")
+            except Exception as e2:
+                # 3° tentativo: firefox
                 try:
-                    page.screenshot(path=str(shot), full_page=True)
-                except:
-                    pass
-                try:
-                    dump.write_text(html, encoding="utf-8")
-                except:
-                    pass
-                print(f"DEBUG: nessun anchor, salvato {shot} e {dump}")
-
-            return html
-        finally:
-            ctx.close()
-            browser.close()
+                    return _do_fetch("firefox")
+                except Exception as e3:
+                    raise e1
       
 # 📌 CONFIGURAZIONE
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -768,9 +772,14 @@ def main():
                 html = fetch_html_browser(s["url"], wait_ms=5000, scrolls=2)
                 soup = BeautifulSoup(html, "lxml")
                 print("DEBUG: anchor annunci =", len(soup.select("a[href*='/annunci/']")))
+                anchors = soup.select("a[href*='/annunci/']")
+                if not anchors:
+                    # fallback: alcuni listing usano card con role=link o <a> senza href completo
+                    anchors = soup.select("a[role='link'], a[href]")
+                print("DEBUG: anchor (fallback) =", len(anchors))
 
                 links = set()
-                for a in soup.select("a[href*='/annunci/']"):
+                for a in anchors:
                     href = a.get("href")
                     if not href:
                         continue
