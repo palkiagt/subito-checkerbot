@@ -1,4 +1,5 @@
-\#!/usr/bin/env python3
+#!/usr/bin/env python3
+
 
 import os, time, json, re, requests
 from bs4 import BeautifulSoup
@@ -7,948 +8,924 @@ from telegram import Bot, InputMediaPhoto
 from telegram.error import TelegramError
 from telegram.ext import Updater, CallbackQueryHandler, Dispatcher
 from hashlib import md5
-LINK\_MAP = {}
+LINK_MAP = {}
 
 import re, time
-from playwright.sync\_api import sync\_playwright
+from playwright.sync_api import sync_playwright
 
 import re
 from bs4 import BeautifulSoup
-from playwright.sync\_api import sync\_playwright
+from playwright.sync_api import sync_playwright
 
 # Clicca il banner cookie se appare
+def _click_cookies(page):
+    patterns = [
+        r"Accetta.*tutti", r"Accetta", r"Consenti", r"OK", r"Accept",
+        r"Rifiuta.*non necessario", r"Continua.*senza accettare"
+    ]
+    # prova bottoni per ruolo/nome
+    for pat in patterns:
+        try:
+            page.get_by_role("button", name=re.compile(pat, re.I)).click(timeout=1200)
+            page.wait_for_timeout(300)
+            return
+        except:
+            pass
+    # fallback CSS comuni
+    for sel in [
+        "button:has-text('Accetta')",
+        "button:has-text('Consenti')",
+        "button:has-text('OK')",
+        "[data-testid*=cookie] button",
+        "[id*='consent'] button",
+    ]:
+        try:
+            page.locator(sel).first.click(timeout=1200)
+            page.wait_for_timeout(300)
+            return
+        except:
+            pass
 
-def \_click\_cookies(page):
-patterns = [
-r"Accetta.\*tutti", r"Accetta", r"Consenti", r"OK", r"Accept",
-r"Rifiuta.*non necessario", r"Continua.*senza accettare"
-]
-\# prova bottoni per ruolo/nome
-for pat in patterns:
-try:
-page.get\_by\_role("button", name=re.compile(pat, re.I)).click(timeout=1200)
-page.wait\_for\_timeout(300)
-return
-except:
-pass
-\# fallback CSS comuni
-for sel in [
-"button\:has-text('Accetta')",
-"button\:has-text('Consenti')",
-"button\:has-text('OK')",
-"[data-testid*=cookie] button",
-"[id*='consent'] button",
-]:
-try:
-page.locator(sel).first.click(timeout=1200)
-page.wait\_for\_timeout(300)
-return
-except:
-pass
+def fetch_html_browser(url: str, wait_ms: int = 2500, scrolls: int = 0) -> str:
+    from playwright.sync_api import sync_playwright
+    import re, time, os
 
-def fetch\_html\_browser(url: str, wait\_ms: int = 2500, scrolls: int = 0) -> str:
-from playwright.sync\_api import sync\_playwright
-import re, time, os
+    def human_ua():
+        # UA recente Chrome su Linux (va bene in VM)
+        return ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-```
-def human_ua():
-    # UA recente Chrome su Linux (va bene in VM)
-    return ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+        ])
+        ctx = browser.new_context(
+            locale="it-IT",
+            timezone_id="Europe/Rome",
+            user_agent=human_ua(),
+            viewport={"width": 1280, "height": 2000},
+            extra_http_headers={
+                "Accept-Language": "it-IT,it;q=0.9",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            }
+        )
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True, args=[
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-    ])
-    ctx = browser.new_context(
-        locale="it-IT",
-        timezone_id="Europe/Rome",
-        user_agent=human_ua(),
-        viewport={"width": 1280, "height": 2000},
-        extra_http_headers={
-            "Accept-Language": "it-IT,it;q=0.9",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-        }
-    )
+        # Rimuovi tracce di automation (navigator.webdriver etc.)
+        ctx.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            window.chrome = window.chrome || { runtime: {} };
+            const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+            if (originalQuery) {
+              window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                  Promise.resolve({ state: Notification.permission }) :
+                  originalQuery(parameters)
+              );
+            }
+        """)
 
-    # Rimuovi tracce di automation (navigator.webdriver etc.)
-    ctx.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        window.chrome = window.chrome || { runtime: {} };
-        const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
-        if (originalQuery) {
-          window.navigator.permissions.query = (parameters) => (
-            parameters.name === 'notifications' ?
-              Promise.resolve({ state: Notification.permission }) :
-              originalQuery(parameters)
-          );
-        }
-    """)
+        page = ctx.new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-    page = ctx.new_page()
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        # Attendi rete quieta: molte card arrivano via XHR.
+        page.wait_for_load_state("networkidle", timeout=20000)  # docs: networkidle :contentReference[oaicite:1]{index=1}
 
-    # Attendi rete quieta: molte card arrivano via XHR.
-    page.wait_for_load_state("networkidle", timeout=20000)  # docs: networkidle :contentReference[oaicite:1]{index=1}
+        # Cookie banner: prova vari fallback
+        def try_click_cookies():
+            tried = False
+            patterns = [r"Accetta.*tutti", r"Accetta", r"Consenti", r"OK", r"Accept"]
+            for pat in patterns:
+                try:
+                    page.get_by_role("button", name=re.compile(pat, re.I)).click(timeout=1200)
+                    tried = True
+                    break
+                except:
+                    pass
+            # selettori comuni CMP (Didomi/OneTrust ecc.)
+            for sel in [
+                "[id*='didomi'] [data-testid*='accept']",
+                "[class*='didomi'] button:has-text('Accetta')",
+                "button:has-text('Accetta')",
+                "button[aria-label*='Accetta']",
+                "[id*='onetrust-accept-btn-handler']",
+                ".ot-sdk-container #onetrust-accept-btn-handler",
+            ]:
+                try:
+                    page.locator(sel).first.click(timeout=1000)
+                    tried = True
+                    break
+                except:
+                    pass
+            return tried
 
-    # Cookie banner: prova vari fallback
-    def try_click_cookies():
-        tried = False
-        patterns = [r"Accetta.*tutti", r"Accetta", r"Consenti", r"OK", r"Accept"]
-        for pat in patterns:
-            try:
-                page.get_by_role("button", name=re.compile(pat, re.I)).click(timeout=1200)
-                tried = True
-                break
-            except:
-                pass
-        # selettori comuni CMP (Didomi/OneTrust ecc.)
-        for sel in [
-            "[id*='didomi'] [data-testid*='accept']",
-            "[class*='didomi'] button:has-text('Accetta')",
-            "button:has-text('Accetta')",
-            "button[aria-label*='Accetta']",
-            "[id*='onetrust-accept-btn-handler']",
-            ".ot-sdk-container #onetrust-accept-btn-handler",
-        ]:
-            try:
-                page.locator(sel).first.click(timeout=1000)
-                tried = True
-                break
-            except:
-                pass
-        return tried
-
-    try_click_cookies()
-    page.wait_for_timeout(wait_ms)
-
-    # Scroll progressivo finché non compaiono ancore verso /annunci/
-    prev_cnt = 0
-    for i in range(12):  # fino ~12 scroll
-        cnt = page.locator("a[href*='/annunci/']").count()
-        if cnt > 0:
-            break
-        # scroll giù
-        page.evaluate("window.scrollBy(0, document.body.scrollHeight * 0.9)")
-        page.wait_for_timeout(1200)
-        # a volte serve “risvegliare” lazy load
-        page.mouse.wheel(0, 2000)
-        page.wait_for_timeout(800)
-        # se bloccato da cookie, riprova click
         try_click_cookies()
-        # se non cresce più, fermati
-        if cnt == prev_cnt and i >= 6:
-            break
-        prev_cnt = cnt
+        page.wait_for_timeout(wait_ms)
 
-    # Ultimo tentativo: attendi specificamente un anchor
-    try:
-        page.wait_for_selector("a[href*='/annunci/']", timeout=4000)
-    except:
-        pass
+        # Scroll progressivo finché non compaiono ancore verso /annunci/
+        prev_cnt = 0
+        for i in range(12):  # fino ~12 scroll
+            cnt = page.locator("a[href*='/annunci/']").count()
+            if cnt > 0:
+                break
+            # scroll giù
+            page.evaluate("window.scrollBy(0, document.body.scrollHeight * 0.9)")
+            page.wait_for_timeout(1200)
+            # a volte serve “risvegliare” lazy load
+            page.mouse.wheel(0, 2000)
+            page.wait_for_timeout(800)
+            # se bloccato da cookie, riprova click
+            try_click_cookies()
+            # se non cresce più, fermati
+            if cnt == prev_cnt and i >= 6:
+                break
+            prev_cnt = cnt
 
-    html = page.content()
+        # Ultimo tentativo: attendi specificamente un anchor
+        try:
+            page.wait_for_selector("a[href*='/annunci/']", timeout=4000)
+        except:
+            pass
 
-    # DIAGNOSTICA: se ancora zero anchor, salva per debug
-    try:
-        anchors = page.locator("a[href*='/annunci/']").count()
-        if anchors == 0:
-            os.makedirs("/tmp/subito-debug", exist_ok=True)
-            ts = str(int(time.time()))
-            page.screenshot(path=f"/tmp/subito-debug/list_{ts}.png", full_page=True)
-            open(f"/tmp/subito-debug/list_{ts}.html", "w").write(html)
-            print(f"DEBUG: anchor=0, salvato /tmp/subito-debug/list_{ts}.png e .html")
-    except:
-        pass
+        html = page.content()
 
-    ctx.close()
-    browser.close()
-    return html
-  
-```
+        # DIAGNOSTICA: se ancora zero anchor, salva per debug
+        try:
+            anchors = page.locator("a[href*='/annunci/']").count()
+            if anchors == 0:
+                os.makedirs("/tmp/subito-debug", exist_ok=True)
+                ts = str(int(time.time()))
+                page.screenshot(path=f"/tmp/subito-debug/list_{ts}.png", full_page=True)
+                open(f"/tmp/subito-debug/list_{ts}.html", "w").write(html)
+                print(f"DEBUG: anchor=0, salvato /tmp/subito-debug/list_{ts}.png e .html")
+        except:
+            pass
 
+        ctx.close()
+        browser.close()
+        return html
+      
 # 📌 CONFIGURAZIONE
-
-TOKEN = os.getenv("TELEGRAM\_TOKEN")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
-raise SystemExit("❌ Variabile d'ambiente TELEGRAM\_TOKEN non impostata. Vedi istruzioni.")
+    raise SystemExit("❌ Variabile d'ambiente TELEGRAM_TOKEN non impostata. Vedi istruzioni.")
 BOT = Bot(TOKEN)
-CHAT\_ID = -4737634103
-GROUP\_ID = -4976140202
+CHAT_ID = -4737634103
+GROUP_ID = -4976140202
+
 
 DATABASE = "seen.json"
-DASH\_INTERVAL = 6 \* 3600
-last\_dash = 0
+DASH_INTERVAL = 6 * 3600
+last_dash = 0
 
 SEARCHES = [
-{"enabled": False, "label": "iPhone 11", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+11&ic=40%2C50&ps=30&pe=100](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+11\&ic=40%2C50\&ps=30\&pe=100)", "min": 30, "max": 100},
-{"enabled": True, "label": "iPhone 11 Pro", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+11+pro&ic=40%2C50&ps=30&pe=150](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+11+pro\&ic=40%2C50\&ps=30\&pe=150)", "min": 30, "max": 150},
-{"enabled": True, "label": "iPhone 11 Pro Max", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+11+pro+max&ic=40%2C50&ps=30&pe=180](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+11+pro+max\&ic=40%2C50\&ps=30\&pe=180)", "min": 30, "max": 180},
-{"enabled": True, "label": "iPhone 12", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+12&ic=40%2C50&ps=30&pe=200](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+12\&ic=40%2C50\&ps=30\&pe=200)", "min": 30, "max": 200},
-{"enabled": True, "label": "iPhone 12 Pro", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+12+pro&ic=40%2C50&ps=30&pe=220](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+12+pro\&ic=40%2C50\&ps=30\&pe=220)", "min": 30, "max": 220},
-{"enabled": True, "label": "iPhone 12 Pro Max", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+12+pro+max&ic=40%2C50&ps=30&pe=250](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+12+pro+max\&ic=40%2C50\&ps=30\&pe=250)", "min": 30, "max": 250},
-{"enabled": True, "label": "iPhone 13", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+13&ic=40%2C50&ps=30&pe=250](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+13\&ic=40%2C50\&ps=30\&pe=250)", "min": 30, "max": 250},
-{"enabled": True, "label": "iPhone 13 Pro", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+13+pro&ic=40%2C50&ps=30&pe=300](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+13+pro\&ic=40%2C50\&ps=30\&pe=300)", "min": 30, "max": 300},
-{"enabled": True, "label": "iPhone 13 Pro Max", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+13+pro+max&ic=40%2C50&ps=30&pe=330](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+13+pro+max\&ic=40%2C50\&ps=30\&pe=330)", "min": 30, "max": 330},
-{"enabled": True, "label": "iPhone 14", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+14&ic=40%2C50&ps=30&pe=350](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+14\&ic=40%2C50\&ps=30\&pe=350)", "min": 30, "max": 350},
-{"enabled": True, "label": "iPhone 14 Pro", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+14+pro&ic=40%2C50&ps=30&pe=370](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+14+pro\&ic=40%2C50\&ps=30\&pe=370)", "min": 30, "max": 370},
-{"enabled": True, "label": "iPhone 14 Pro Max", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+14+pro+max&ic=40%2C50&ps=30&pe=400](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+14+pro+max\&ic=40%2C50\&ps=30\&pe=400)", "min": 30, "max": 400},
-{"enabled": True, "label": "iPhone 15", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+15&ic=40%2C50&ps=30&pe=400](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+15\&ic=40%2C50\&ps=30\&pe=400)", "min": 30, "max": 400},
-{"enabled": True, "label": "iPhone 15 Pro", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+15+pro&ic=40%2C50&ps=30&pe=420](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+15+pro\&ic=40%2C50\&ps=30\&pe=420)", "min": 30, "max": 420},
-{"enabled": True, "label": "iPhone 15 Pro Max", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+15+pro+max&ic=40%2C50&ps=30&pe=450](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+15+pro+max\&ic=40%2C50\&ps=30\&pe=450)", "min": 30, "max": 450},
-{"enabled": True, "label": "iPhone 16", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+16&ic=40%2C50&ps=30&pe=400](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+16\&ic=40%2C50\&ps=30\&pe=400)", "min": 30, "max": 400},
-{"enabled": True, "label": "iPhone 16 Pro", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+16+pro&ic=40%2C50&ps=30&pe=420](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+16+pro\&ic=40%2C50\&ps=30\&pe=420)", "min": 30, "max": 420},
-{"enabled": True, "label": "iPhone 16 Pro Max", "url": "[https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+16+pro+max&ic=40%2C50&ps=30&pe=450](https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+16+pro+max\&ic=40%2C50\&ps=30\&pe=450)", "min": 30, "max": 450}
+    {"enabled": False, "label": "iPhone 11", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+11&ic=40%2C50&ps=30&pe=100", "min": 30, "max": 100},
+    {"enabled": True, "label": "iPhone 11 Pro", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+11+pro&ic=40%2C50&ps=30&pe=150", "min": 30, "max": 150},
+    {"enabled": True, "label": "iPhone 11 Pro Max", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+11+pro+max&ic=40%2C50&ps=30&pe=180", "min": 30, "max": 180},
+    {"enabled": True, "label": "iPhone 12", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+12&ic=40%2C50&ps=30&pe=200", "min": 30, "max": 200},
+    {"enabled": True, "label": "iPhone 12 Pro", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+12+pro&ic=40%2C50&ps=30&pe=220", "min": 30, "max": 220},
+    {"enabled": True, "label": "iPhone 12 Pro Max", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+12+pro+max&ic=40%2C50&ps=30&pe=250", "min": 30, "max": 250},
+    {"enabled": True, "label": "iPhone 13", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+13&ic=40%2C50&ps=30&pe=250", "min": 30, "max": 250},
+    {"enabled": True, "label": "iPhone 13 Pro", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+13+pro&ic=40%2C50&ps=30&pe=300", "min": 30, "max": 300},
+    {"enabled": True, "label": "iPhone 13 Pro Max", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+13+pro+max&ic=40%2C50&ps=30&pe=330", "min": 30, "max": 330},
+    {"enabled": True, "label": "iPhone 14", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+14&ic=40%2C50&ps=30&pe=350", "min": 30, "max": 350},
+    {"enabled": True, "label": "iPhone 14 Pro", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+14+pro&ic=40%2C50&ps=30&pe=370", "min": 30, "max": 370},
+    {"enabled": True, "label": "iPhone 14 Pro Max", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+14+pro+max&ic=40%2C50&ps=30&pe=400", "min": 30, "max": 400},
+    {"enabled": True, "label": "iPhone 15", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+15&ic=40%2C50&ps=30&pe=400", "min": 30, "max": 400},
+    {"enabled": True, "label": "iPhone 15 Pro", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+15+pro&ic=40%2C50&ps=30&pe=420", "min": 30, "max": 420},
+    {"enabled": True, "label": "iPhone 15 Pro Max", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+15+pro+max&ic=40%2C50&ps=30&pe=450", "min": 30, "max": 450},
+    {"enabled": True, "label": "iPhone 16", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+16&ic=40%2C50&ps=30&pe=400", "min": 30, "max": 400},
+    {"enabled": True, "label": "iPhone 16 Pro", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+16+pro&ic=40%2C50&ps=30&pe=420", "min": 30, "max": 420},
+    {"enabled": True, "label": "iPhone 16 Pro Max", "url": "https://www.subito.it/annunci-italia/vendita/telefonia/?q=iphone+16+pro+max&ic=40%2C50&ps=30&pe=450", "min": 30, "max": 450}
 ]
 
 KEYWORDS = {
-"64 GB": [r"\b64\s?gb\b", r"\b64\s?g\b", r"\b64\s?gigabyte\b"],
-"128 GB": [r"\b128\s?gb\b", r"\b128\s?g\b", r"\b128\s?gigabyte\b"],
-"256 GB": [r"\b256\s?gb\b", r"\b256\s?g\b", r"\b256\s?gigabyte\b"],
-"512 GB": [r"\b512\s?gb\b", r"\b512\s?g\b", r"\b512\s?gigabyte\b"],
-"1 TB": [r"\b1\s?tb\b", r"\b1000\s?gb\b"],
-"Display rotto": [r"display.\*rotto", r"schermo.\*rotto", r"lcd.\*rotto", r"vetro.\*rotto"],
-"Display crepato": [r"(display|schermo|vetro).*crepat", r"crepa.*(schermo|display|vetro)"],
-"Display sostituito": [r"display.\*sostituito", r"schermo.\*sostituito", r"lcd.\*nuovo"],
-"Display funzionante": [r"display.\*funzionante", r"schermo.*funziona"],
-"Batteria da cambiare": [r"batteria.*(cambiare|sostituire)", r"autonomia.\*scarsa"],
-"Batteria nuova": [r"batteria.*nuova"],
-"Batteria originale": [r"batteria.*originale"],
-"Batteria 80%": [r"batteria.*80\s?%"],
-"Batteria 85%": [r"batteria.*85\s?%"],
-"Batteria 90%": [r"batteria.*90\s?%"],
-"Graffi": [r"graffiato", r"graffi", r"scocca.*rovinata", r"cover.*rigata"],
-"Ammaccature": [r"ammaccatura", r"ammaccato"],
-"Vetro posteriore rotto": [r"vetro posteriore.*rotto"],
-"Vetro scheggiato": [r"vetro.*scheggiat", r"scheggiatura"],
-"Laterale graffiato": [r"laterale.*(rigato|graffiato)", r"lato.*(sinistro|destro).*graffi"],
-"Face ID non funzionante": [r"face.?id.*(non funziona|rotto|assente)", r"sblocco facciale.*(non funziona|non attivo)"],
-"Tasto power rotto": [r"tasto.*power.*rotto"],
-"Tasto volume rotto": [r"tasto.*volume.*rotto"],
-"Tasto home non funziona": [r"tasto.*home.*(non funziona|rotto)"],
-"Audio non funzionante": [r"audio.*(non funziona|assente)"],
-"Microfono rotto": [r"microfono.*(non funziona|rotto)"],
-"Speaker da cambiare": [r"speaker.*(rotto|cambiare)"],
-"Fotocamera rotta": [r"fotocamera.*(non funziona|rotta)"],
-"Sim non rilevata": [r"sim.*(non rilevata|non legge)"],
-"Touch non risponde": [r"touch.*(non risponde|rotto)"],
-"Danneggiato": [r"\bdanneggiato\b"],
-"Non funzionante": [r"non\sfunzionante"],
-"Da riparare": [r"\bda\s+riparare\b"],
-"Bloccato": [r"\bbloccato\b"],
-"Non si accende": [r"non si accende"],
-"Riparabile": [r"\briparabile\b"],
-"Caduto": [r"cadut[ao]", r"caduta.*accidentale"],
-"Crepa": [r"crepa", r"crepatur", r"crepato", r"crepata"],
-"Cornice rovinata": [r"cornice.*(rovinata|ammaccata)"],
-"Schermo cambiato": [r"schermo.*(cambiato|nuovo)", r"display.*rimpiazzato"],
-"Schermo originale": [r"display.*originale", r"lcd.*originale"],
-"Vetro incrinato": [r"vetro.*(incrinato|fessurato)", r"linea.*vetro"],
-"Segni d'usura": [r"segni.*usura", r"usurato", r"consumato"],
-"Cover rotta": [r"cover.*(rotta|crepata|spaccata)"],
-"Tasto rotto": [r"tasto.*(non funziona|rotto|bloccato)"],
-"Problema ricarica": [r"ricarica.*(non funziona|problema|difetto)", r"porta.*lightning.*(difettosa|rotta)"],
-"Face ID ok": [r"face.?id.*(funziona|ok|attivo)"],
-"Face ID assente": [r"face.?id.*(assente|disattivato)"],
-"Face ID presente": [r"face.?id.*(presente|attivo)"],
-"Tasto power ok": [r"tasto.*power.*(funziona|ok)"],
-"Speaker funzionante": [r"speaker.*ok", r"audio.*pulito"],
-"Audio perfetto": [r"audio.*(perfetto|pulito|forte)"],
-"Touch perfetto": [r"touch.*(funziona|reattivo|ok)"],
-"Camera ok": [r"fotocamera.*(funziona|ok|chiara)"],
-"Tasto silenzioso rotto": [r"tasto.*silenzioso.*(rotto|non funziona)"],
-"Difetti estetici": [r"difetti.\*estetici", r"piccoli.\*segni", r"imperfezioni"],
-"Ripristinabile": [r"ripristinabile", r"può.\*riparare", r"facile.\*riparare"],
-"Problemi software": [r"problema.*software", r"sistema.*bloccato"],
-"Schermo nero": [r"schermo.*nero", r"display.*non si vede"],
-"Face ID danneggiato": [r"face.?id.*(danneggiato|difettoso|non rileva|saltuari)"],
-"Face ID assente": [r"face.?id.*(assente|rimosso|mancante)"],
-"True Tone assente": [r"true tone.*(non attivo|disattivo|assente)"],
-"Face ID presente": [r"face.?id.*(presente|funzionante|attivo)"],
-"Autenticazione fallita": [r"sblocco.\*non riuscito", r"face.?id.\*fallisce"],
-"Vetro rovinato": [r"vetro.\*rovinato", r"vetro.\*rigato"],
-"Ghost touch": [r"ghost.*touch", r"schermo.*impazzisce", r"tocchi.*fantasma"],
-"Frame danneggiato": [r"(frame|struttura|bordo).*danneggiat", r"scocca.*piegata"],
-"Display originale": [r"display.*originale", r"lcd.*originale", r"schermo.*apple"],
-"Display compatibile": [r"display.*compatibile", r"lcd.*aftermarket"],
-"Display non originale": [r"display.*non.*originale", r"schermo.*non.*apple"],
-"Touch ID assente": [r"touch.?id.*(assente|rimosso|non presente)"],
-"Touch ID ok": [r"touch.?id.*(funziona|ok|presente)"],
-"Problemi con Wi-Fi": [r"wifi.*(non funziona|problema|instabile)"],
-"Bluetooth rotto": [r"bluetooth.*(non funziona|rotto|non rileva)"],
-"NFC non funzionante": [r"nfc.*(non funziona|non attivo)"],
-"FaceTime rotto": [r"facetime.*(non funziona|difettoso)"],
-"iMessage non attivo": [r"imessage.*(non funziona|non attivo)"],
-"iCloud bloccato": [r"icloud.*(bloccato|account|non rimuovibile)"],
-"iCloud libero": [r"icloud.*(libero|pulito|senza account)"],
-"Batteria gonfia": [r"batteria.*(gonfia|rigonfia|deformata)"],
-"Batteria usurata": [r"batteria.*(usurata|vecchia|stanca)"],
-"Problema tasto mute": [r"tasto.*(silenzioso|mute).*(non funziona|rotto)"],
-"Speaker gracchia": [r"speaker.*(gracchia|distorto|basso volume)"],
-"Porta lightning rotta": [r"(porta|connettore).*lightning.*(non funziona|rotto|ossidato)"],
-"Problema caricatore": [r"non si carica", r"caricatore.\*non va"],
-"Danno da liquido": [r"danno.\*liquido", r"ossidazione", r"acqua.*dentro"],
-"Danno da calore": [r"surriscald", r"scalda.*molto", r"telefono.*caldo"],
-"Riparazione non riuscita": [r"riparazione.*non.*riuscita", r"tentato.*fix"],
-"Touch sfarfalla": [r"touch.*(sfarfallio|instabile|impazzito)"],
-"Schermo sbiadito": [r"schermo.*(sbiadito|colori strani|pallido)"],
-"Schermo giallo": [r"schermo.*(giallo|tinta calda|alterato)"],
-"Schermo lampeggia": [r"schermo.*(lampeggia|flicker|intermittente)"],
-"Modello estero": [r"modello.*(giappone|usa|hk|import)", r"iphone.*(japan|hk|china)"],
-"Versione demo": [r"versione.\*demo", r"iphone.*demo", r"unità.*espositiva"],
-"IMEI non leggibile": [r"imei.*(non visibile|non leggibile|cancellato)"],
-"IMEI ok": [r"imei.*(ok|verificato|pulito)"],
-"Blocco operatore": [r"operatore.\*bloccato", r"sim.\*lock"],
-"Firmware bloccato": [r"firmware.\*bloccato", r"versione.\*sblocco"],
-"Boot loop": [r"boot.\*loop", r"riavvio.\*continuo", r"continua.\*riavviarsi"],
-"iOS non aggiornabile": [r"ios.\*non aggiornabile", r"aggiornamento.*non riuscito"],
-"Problema backup": [r"backup.*(non riuscito|impossibile)"],
-"Errore ripristino": [r"errore.\*ripristino", r"problema.*reset"],
-"Segnale assente": [r"nessun.*segnale", r"antenna.*non funziona", r"campo.*zero"],
-"Problema generico": [r"non va", r"non funziona", r"difettoso", r"rotto", r"guasto", r"problema", r"non operativo", r"non parte", r"difetto"],
-"Prezzo trattabile": [r"prezzo.*trattabile", r"trattabile", r"trattabili", r"poco trattabile"],
-"Segni di normale usura": [r"normale.*usura", r"segni.*normale.*utilizzo", r"segni.*di.*uso", r"usura.*normale"],
-"Face ID funzionante": [
-r"face.?id.*(funziona|ok|attivo|presente|va)",
-r"sblocco facciale.*(funziona|ok|presente|attivo|va)"
+    "64 GB": [r"\b64\s?gb\b", r"\b64\s?g\b", r"\b64\s?gigabyte\b"],
+    "128 GB": [r"\b128\s?gb\b", r"\b128\s?g\b", r"\b128\s?gigabyte\b"],
+    "256 GB": [r"\b256\s?gb\b", r"\b256\s?g\b", r"\b256\s?gigabyte\b"],
+    "512 GB": [r"\b512\s?gb\b", r"\b512\s?g\b", r"\b512\s?gigabyte\b"],
+    "1 TB": [r"\b1\s?tb\b", r"\b1000\s?gb\b"],
+    "Display rotto": [r"display.*rotto", r"schermo.*rotto", r"lcd.*rotto", r"vetro.*rotto"],
+    "Display crepato": [r"(display|schermo|vetro).*crepat", r"crepa.*(schermo|display|vetro)"],
+    "Display sostituito": [r"display.*sostituito", r"schermo.*sostituito", r"lcd.*nuovo"],
+    "Display funzionante": [r"display.*funzionante", r"schermo.*funziona"],
+    "Batteria da cambiare": [r"batteria.*(cambiare|sostituire)", r"autonomia.*scarsa"],
+    "Batteria nuova": [r"batteria.*nuova"],
+    "Batteria originale": [r"batteria.*originale"],
+    "Batteria 80%": [r"batteria.*80\s?%"],
+    "Batteria 85%": [r"batteria.*85\s?%"],
+    "Batteria 90%": [r"batteria.*90\s?%"],
+    "Graffi": [r"graffiato", r"graffi", r"scocca.*rovinata", r"cover.*rigata"],
+    "Ammaccature": [r"ammaccatura", r"ammaccato"],
+    "Vetro posteriore rotto": [r"vetro posteriore.*rotto"],
+    "Vetro scheggiato": [r"vetro.*scheggiat", r"scheggiatura"],
+    "Laterale graffiato": [r"laterale.*(rigato|graffiato)", r"lato.*(sinistro|destro).*graffi"],
+    "Face ID non funzionante": [r"face.?id.*(non funziona|rotto|assente)", r"sblocco facciale.*(non funziona|non attivo)"],
+    "Tasto power rotto": [r"tasto.*power.*rotto"],
+    "Tasto volume rotto": [r"tasto.*volume.*rotto"],
+    "Tasto home non funziona": [r"tasto.*home.*(non funziona|rotto)"],
+    "Audio non funzionante": [r"audio.*(non funziona|assente)"],
+    "Microfono rotto": [r"microfono.*(non funziona|rotto)"],
+    "Speaker da cambiare": [r"speaker.*(rotto|cambiare)"],
+    "Fotocamera rotta": [r"fotocamera.*(non funziona|rotta)"],
+    "Sim non rilevata": [r"sim.*(non rilevata|non legge)"],
+    "Touch non risponde": [r"touch.*(non risponde|rotto)"],
+    "Danneggiato": [r"\bdanneggiato\b"],
+    "Non funzionante": [r"non\sfunzionante"],
+    "Da riparare": [r"\bda\s+riparare\b"],
+    "Bloccato": [r"\bbloccato\b"],
+    "Non si accende": [r"non si accende"],
+    "Riparabile": [r"\briparabile\b"],
+    "Caduto": [r"cadut[ao]", r"caduta.*accidentale"],
+    "Crepa": [r"crepa", r"crepatur", r"crepato", r"crepata"],
+    "Cornice rovinata": [r"cornice.*(rovinata|ammaccata)"],
+    "Schermo cambiato": [r"schermo.*(cambiato|nuovo)", r"display.*rimpiazzato"],
+    "Schermo originale": [r"display.*originale", r"lcd.*originale"],
+    "Vetro incrinato": [r"vetro.*(incrinato|fessurato)", r"linea.*vetro"],
+    "Segni d'usura": [r"segni.*usura", r"usurato", r"consumato"],
+    "Cover rotta": [r"cover.*(rotta|crepata|spaccata)"],
+    "Tasto rotto": [r"tasto.*(non funziona|rotto|bloccato)"],
+    "Problema ricarica": [r"ricarica.*(non funziona|problema|difetto)", r"porta.*lightning.*(difettosa|rotta)"],
+    "Face ID ok": [r"face.?id.*(funziona|ok|attivo)"],
+    "Face ID assente": [r"face.?id.*(assente|disattivato)"],
+    "Face ID presente": [r"face.?id.*(presente|attivo)"],
+    "Tasto power ok": [r"tasto.*power.*(funziona|ok)"],
+    "Speaker funzionante": [r"speaker.*ok", r"audio.*pulito"],
+    "Audio perfetto": [r"audio.*(perfetto|pulito|forte)"],
+    "Touch perfetto": [r"touch.*(funziona|reattivo|ok)"],
+    "Camera ok": [r"fotocamera.*(funziona|ok|chiara)"],
+    "Tasto silenzioso rotto": [r"tasto.*silenzioso.*(rotto|non funziona)"],
+    "Difetti estetici": [r"difetti.*estetici", r"piccoli.*segni", r"imperfezioni"],
+    "Ripristinabile": [r"ripristinabile", r"può.*riparare", r"facile.*riparare"],
+    "Problemi software": [r"problema.*software", r"sistema.*bloccato"],
+    "Schermo nero": [r"schermo.*nero", r"display.*non si vede"],
+    "Face ID danneggiato": [r"face.?id.*(danneggiato|difettoso|non rileva|saltuari)"],
+    "Face ID assente": [r"face.?id.*(assente|rimosso|mancante)"],
+    "True Tone assente": [r"true tone.*(non attivo|disattivo|assente)"],
+    "Face ID presente": [r"face.?id.*(presente|funzionante|attivo)"],
+    "Autenticazione fallita": [r"sblocco.*non riuscito", r"face.?id.*fallisce"],
+    "Vetro rovinato": [r"vetro.*rovinato", r"vetro.*rigato"],
+    "Ghost touch": [r"ghost.*touch", r"schermo.*impazzisce", r"tocchi.*fantasma"],
+    "Frame danneggiato": [r"(frame|struttura|bordo).*danneggiat", r"scocca.*piegata"],
+    "Display originale": [r"display.*originale", r"lcd.*originale", r"schermo.*apple"],
+    "Display compatibile": [r"display.*compatibile", r"lcd.*aftermarket"],
+    "Display non originale": [r"display.*non.*originale", r"schermo.*non.*apple"],
+    "Touch ID assente": [r"touch.?id.*(assente|rimosso|non presente)"],
+    "Touch ID ok": [r"touch.?id.*(funziona|ok|presente)"],
+    "Problemi con Wi-Fi": [r"wifi.*(non funziona|problema|instabile)"],
+    "Bluetooth rotto": [r"bluetooth.*(non funziona|rotto|non rileva)"],
+    "NFC non funzionante": [r"nfc.*(non funziona|non attivo)"],
+    "FaceTime rotto": [r"facetime.*(non funziona|difettoso)"],
+    "iMessage non attivo": [r"imessage.*(non funziona|non attivo)"],
+    "iCloud bloccato": [r"icloud.*(bloccato|account|non rimuovibile)"],
+    "iCloud libero": [r"icloud.*(libero|pulito|senza account)"],
+    "Batteria gonfia": [r"batteria.*(gonfia|rigonfia|deformata)"],
+    "Batteria usurata": [r"batteria.*(usurata|vecchia|stanca)"],
+    "Problema tasto mute": [r"tasto.*(silenzioso|mute).*(non funziona|rotto)"],
+    "Speaker gracchia": [r"speaker.*(gracchia|distorto|basso volume)"],
+    "Porta lightning rotta": [r"(porta|connettore).*lightning.*(non funziona|rotto|ossidato)"],
+    "Problema caricatore": [r"non si carica", r"caricatore.*non va"],
+    "Danno da liquido": [r"danno.*liquido", r"ossidazione", r"acqua.*dentro"],
+    "Danno da calore": [r"surriscald", r"scalda.*molto", r"telefono.*caldo"],
+    "Riparazione non riuscita": [r"riparazione.*non.*riuscita", r"tentato.*fix"],
+    "Touch sfarfalla": [r"touch.*(sfarfallio|instabile|impazzito)"],
+    "Schermo sbiadito": [r"schermo.*(sbiadito|colori strani|pallido)"],
+    "Schermo giallo": [r"schermo.*(giallo|tinta calda|alterato)"],
+    "Schermo lampeggia": [r"schermo.*(lampeggia|flicker|intermittente)"],
+    "Modello estero": [r"modello.*(giappone|usa|hk|import)", r"iphone.*(japan|hk|china)"],
+    "Versione demo": [r"versione.*demo", r"iphone.*demo", r"unità.*espositiva"],
+    "IMEI non leggibile": [r"imei.*(non visibile|non leggibile|cancellato)"],
+    "IMEI ok": [r"imei.*(ok|verificato|pulito)"],
+    "Blocco operatore": [r"operatore.*bloccato", r"sim.*lock"],
+    "Firmware bloccato": [r"firmware.*bloccato", r"versione.*sblocco"],
+    "Boot loop": [r"boot.*loop", r"riavvio.*continuo", r"continua.*riavviarsi"],
+    "iOS non aggiornabile": [r"ios.*non aggiornabile", r"aggiornamento.*non riuscito"],
+    "Problema backup": [r"backup.*(non riuscito|impossibile)"],
+    "Errore ripristino": [r"errore.*ripristino", r"problema.*reset"],
+    "Segnale assente": [r"nessun.*segnale", r"antenna.*non funziona", r"campo.*zero"],
+    "Problema generico": [r"non va", r"non funziona", r"difettoso", r"rotto", r"guasto", r"problema", r"non operativo", r"non parte", r"difetto"],
+    "Prezzo trattabile": [r"prezzo.*trattabile", r"trattabile", r"trattabili", r"poco trattabile"],
+    "Segni di normale usura": [r"normale.*usura", r"segni.*normale.*utilizzo", r"segni.*di.*uso", r"usura.*normale"],
+    "Face ID funzionante": [
+    r"face.?id.*(funziona|ok|attivo|presente|va)",
+    r"sblocco facciale.*(funziona|ok|presente|attivo|va)"
 ],
 "Face ID non funzionante": [
-r"face.?id.*(non funziona|non va|rotto|assente|disattivo|difettoso|non attivo|guasto|non rileva|non parte)",
-r"sblocco facciale.*(non funziona|non va|difettoso|assente|rotto|non rileva|disattivato|problema|guasto)"
+    r"face.?id.*(non funziona|non va|rotto|assente|disattivo|difettoso|non attivo|guasto|non rileva|non parte)",
+    r"sblocco facciale.*(non funziona|non va|difettoso|assente|rotto|non rileva|disattivato|problema|guasto)"
 ],
 "Face ID assente": [
-r"face.?id.*(assente|mancante|rimosso|non c.?è)",
-r"sblocco facciale.*(assente|non presente|rimosso|mancante)"
+    r"face.?id.*(assente|mancante|rimosso|non c.?è)",
+    r"sblocco facciale.*(assente|non presente|rimosso|mancante)"
 ],
 "Face ID danneggiato": [
-r"face.?id.*(danneggiato|saltuari|non rileva|non stabile|malfunzionante)",
-r"sblocco facciale.*(danneggiato|instabile|problema|malfunzionante)"
+    r"face.?id.*(danneggiato|saltuari|non rileva|non stabile|malfunzionante)",
+    r"sblocco facciale.*(danneggiato|instabile|problema|malfunzionante)"
 ],
 "Face ID presente": [
-r"face.?id.*(presente|installato|abilitato)",
-r"sblocco facciale.*(presente|attivo)"
+    r"face.?id.*(presente|installato|abilitato)",
+    r"sblocco facciale.*(presente|attivo)"
 ],
 "Errore Face ID": [
-r"face.?id.*errore",
-r"errore.*sblocco facciale"
+    r"face.?id.*errore",
+    r"errore.*sblocco facciale"
 ],
 "Autenticazione fallita": [
-r"autenticazione.*(fallita|errore)",
-r"sblocco.*(fallito|non riuscito)",
-r"face.?id.*(non disponibile|non rilevato)"
+    r"autenticazione.*(fallita|errore)",
+    r"sblocco.*(fallito|non riuscito)",
+    r"face.?id.*(non disponibile|non rilevato)"
 ],
 
 }
 
 if os.path.isfile(DATABASE):
-seen = set(json.load(open(DATABASE)))
+    seen = set(json.load(open(DATABASE)))
 else:
-seen = set()
+    seen = set()
+  
+def load_json(file):
+    if os.path.isfile(file):
+        return set(json.load(open(file)))
+    return set()
 
-def load\_json(file):
-if os.path.isfile(file):
-return set(json.load(open(file)))
-return set()
+def save_json(file, data):
+    json.dump(list(data), open(file, "w"))
 
-def save\_json(file, data):
-json.dump(list(data), open(file, "w"))
+saved = load_json("saved.json")
+discarded = load_json("discarded.json")
 
-saved = load\_json("saved.json")
-discarded = load\_json("discarded.json")
-
-def save\_seen():
-json.dump(list(seen), open(DATABASE, "w"))
+def save_seen():
+    json.dump(list(seen), open(DATABASE, "w"))
 from datetime import timedelta
 
-def parse\_date(date\_str):
-date\_str = date\_str.strip().lower()
-now = datetime.now()
+def parse_date(date_str):
+    date_str = date_str.strip().lower()
+    now = datetime.now()
 
-```
-if "oggi" in date_str or "ora" in date_str:
-    return now
-if "ieri" in date_str:
-    return now - timedelta(days=1)
+    if "oggi" in date_str or "ora" in date_str:
+        return now
+    if "ieri" in date_str:
+        return now - timedelta(days=1)
 
-# Match tipo "10 feb"
-match = re.search(r"(\d{1,2})\s+(\w+)", date_str)
-if match:
-    day, month_str = match.groups()
-    month_str = month_str[:3]  # riduci a 3 lettere per sicurezza
-    month_map = {
-        "gen": 1, "feb": 2, "mar": 3, "apr": 4, "mag": 5, "giu": 6,
-        "lug": 7, "ago": 8, "set": 9, "ott": 10, "nov": 11, "dic": 12
-    }
-    month = month_map.get(month_str)
-    if month:
-        parsed_date = datetime(now.year, month, int(day))
-        # Se la data è nel futuro (es. 30 dic oggi che è luglio), allora è dell'anno scorso
-        if parsed_date > now:
-            parsed_date = parsed_date.replace(year=now.year - 1)
-        return parsed_date
-return None
-```
+    # Match tipo "10 feb"
+    match = re.search(r"(\d{1,2})\s+(\w+)", date_str)
+    if match:
+        day, month_str = match.groups()
+        month_str = month_str[:3]  # riduci a 3 lettere per sicurezza
+        month_map = {
+            "gen": 1, "feb": 2, "mar": 3, "apr": 4, "mag": 5, "giu": 6,
+            "lug": 7, "ago": 8, "set": 9, "ott": 10, "nov": 11, "dic": 12
+        }
+        month = month_map.get(month_str)
+        if month:
+            parsed_date = datetime(now.year, month, int(day))
+            # Se la data è nel futuro (es. 30 dic oggi che è luglio), allora è dell'anno scorso
+            if parsed_date > now:
+                parsed_date = parsed_date.replace(year=now.year - 1)
+            return parsed_date
+    return None
 
-def extract\_title\_model(soup):
-title\_tag = soup.find("h1")
-if not title\_tag:
-return None
-title = title\_tag.text.lower()
-match = re.search(r"iphone\s+(\d{2})", title)
-if not match:
-return None
-parts = ["iPhone", match.group(1)]
-if "pro" in title:
-parts.append("Pro")
-if "max" in title:
-parts.append("Max")
-elif "plus" in title:
-parts.append("Plus")
-return " ".join(parts)
+def extract_title_model(soup):
+    title_tag = soup.find("h1")
+    if not title_tag:
+        return None
+    title = title_tag.text.lower()
+    match = re.search(r"iphone\s+(\d{2})", title)
+    if not match:
+        return None
+    parts = ["iPhone", match.group(1)]
+    if "pro" in title:
+        parts.append("Pro")
+    if "max" in title:
+        parts.append("Max")
+    elif "plus" in title:
+        parts.append("Plus")
+    return " ".join(parts)
 
 def extract(link):
-"""
-Estrae i campi principali da una pagina annuncio Subito.
-Ritorna: price, cond, city, date\_txt, likes, details, imgs, label, venduto
-"""
-\# 1) Carica DETTAGLIO con Playwright (NON requests)
-html\_item = fetch\_html\_browser(link, wait\_ms=2000)   # 2s sul dettaglio aiuta a popolare prezzo/testi
-s = BeautifulSoup(html\_item, "lxml")
+    """
+    Estrae i campi principali da una pagina annuncio Subito.
+    Ritorna: price, cond, city, date_txt, likes, details, imgs, label, venduto
+    """
+    # 1) Carica DETTAGLIO con Playwright (NON requests)
+    html_item = fetch_html_browser(link, wait_ms=2000)   # 2s sul dettaglio aiuta a popolare prezzo/testi
+    s = BeautifulSoup(html_item, "lxml")
 
-```
-# 2) Flag "venduto"
-venduto = bool(
-    s.find(string=re.compile(r"\bvendut[oa]\b", re.I)) or
-    s.find(class_=re.compile(r"\bsold\b", re.I))
-)
+    # 2) Flag "venduto"
+    venduto = bool(
+        s.find(string=re.compile(r"\bvendut[oa]\b", re.I)) or
+        s.find(class_=re.compile(r"\bsold\b", re.I))
+    )
 
-# 3) Prezzo (euristica robusta su tutto il testo)
-full_text = " ".join(s.get_text(" ").split())
-m_price = re.search(r"(\d{1,3}(?:[.\s]\d{3})*(?:,\d+)?|\d+(?:,\d+)?)\s*€", full_text)
-if m_price:
-    raw = m_price.group(1).replace(" ", "").replace(".", "").replace(",", ".")
-    try:
-        price = int(float(raw))
-    except:
+    # 3) Prezzo (euristica robusta su tutto il testo)
+    full_text = " ".join(s.get_text(" ").split())
+    m_price = re.search(r"(\d{1,3}(?:[.\s]\d{3})*(?:,\d+)?|\d+(?:,\d+)?)\s*€", full_text)
+    if m_price:
+        raw = m_price.group(1).replace(" ", "").replace(".", "").replace(",", ".")
+        try:
+            price = int(float(raw))
+        except:
+            price = 0
+    else:
         price = 0
-else:
-    price = 0
 
-# 4) Condizione (parole chiave frequenti)
-lt = full_text.lower()
-if any(k in lt for k in ["dannegg", "guasto", "difettoso", "non funzion", "rotto", "per pezzi"]):
-    cond = "Danneggiato"
-elif any(k in lt for k in ["buono", "ottimo", "usato", "perfetto", "funzionante", "pari al nuovo", "come nuovo"]):
-    cond = "Buono"
-else:
-    cond = "N/D"
+    # 4) Condizione (parole chiave frequenti)
+    lt = full_text.lower()
+    if any(k in lt for k in ["dannegg", "guasto", "difettoso", "non funzion", "rotto", "per pezzi"]):
+        cond = "Danneggiato"
+    elif any(k in lt for k in ["buono", "ottimo", "usato", "perfetto", "funzionante", "pari al nuovo", "come nuovo"]):
+        cond = "Buono"
+    else:
+        cond = "N/D"
 
-# 5) Città (prendi un blocco plausibile: location)
-city = ""
-for sel in ["[class*='location']", "[data-testid*='location']", "div:has(span:matches('(?i)\\b\\w+\\b')) span", "p", "span"]:
-    el = s.select_one(sel)
-    if el:
-        txt = el.get_text(" ", strip=True)
-        # filtra stringhe troppo lunghe/noise
-        if txt and 2 <= len(txt) <= 60:
-            city = txt
+    # 5) Città (prendi un blocco plausibile: location)
+    city = ""
+    for sel in ["[class*='location']", "[data-testid*='location']", "div:has(span:matches('(?i)\\b\\w+\\b')) span", "p", "span"]:
+        el = s.select_one(sel)
+        if el:
+            txt = el.get_text(" ", strip=True)
+            # filtra stringhe troppo lunghe/noise
+            if txt and 2 <= len(txt) <= 60:
+                city = txt
+                break
+
+    # 6) Data testuale (usa <time> o pattern tipo 'oggi/ieri' o '10 ago')
+    date_txt = ""
+    t = s.find("time")
+    if t and t.get_text(strip=True):
+        date_txt = t.get_text(strip=True)
+    else:
+        m_date = re.search(r"\b(oggi|ieri|\d{1,2}\s+[a-z]{3,})\b", full_text, re.I)
+        if m_date:
+            date_txt = m_date.group(1)
+
+    # 7) Likes/preferiti (se visibili)
+    likes = "0"
+    like_node = s.find(string=re.compile(r"(mi\s+piace|like|preferit[io])", re.I))
+    if like_node:
+        ln = like_node if isinstance(like_node, str) else like_node.get_text(" ")
+        m_like = re.search(r"(\d+)", ln)
+        if m_like:
+            likes = m_like.group(1)
+
+    # 8) Dettagli/keyword (opzionale: usa KEYWORDS se esiste nel tuo script)
+    details = []
+    try:
+        for label, patterns in KEYWORDS.items():  # KEYWORDS deve essere definito nel tuo file
+            for pattern in patterns:
+                if re.search(pattern, full_text, re.I):
+                    details.append(label)
+                    break
+    except NameError:
+        details = []  # Se non hai KEYWORDS, lascia vuoto
+
+    # 9) Immagini (prendi qualche src valido)
+    imgs = []
+    for img in s.find_all("img"):
+        src = (img.get("src") or "").strip()
+        if src.startswith("http"):
+            imgs.append(src)
+        if len(imgs) >= 5:
             break
 
-# 6) Data testuale (usa <time> o pattern tipo 'oggi/ieri' o '10 ago')
-date_txt = ""
-t = s.find("time")
-if t and t.get_text(strip=True):
-    date_txt = t.get_text(strip=True)
-else:
-    m_date = re.search(r"\b(oggi|ieri|\d{1,2}\s+[a-z]{3,})\b", full_text, re.I)
-    if m_date:
-        date_txt = m_date.group(1)
+    # 10) Label/modello (euristica semplice: dal <title> o h1/h2)
+    label = ""
+    title_el = s.find(["h1", "h2"]) or s.find("title")
+    if title_el:
+        label = title_el.get_text(" ", strip=True)
+    if not label:
+        # fallback: parole chiave tipiche
+        m_lbl = re.search(r"(iPhone\s?\d{1,2}\s?(Pro|Pro Max|Mini)?)", full_text, re.I)
+        label = m_lbl.group(1) if m_lbl else "iPhone"
 
-# 7) Likes/preferiti (se visibili)
-likes = "0"
-like_node = s.find(string=re.compile(r"(mi\s+piace|like|preferit[io])", re.I))
-if like_node:
-    ln = like_node if isinstance(like_node, str) else like_node.get_text(" ")
-    m_like = re.search(r"(\d+)", ln)
-    if m_like:
-        likes = m_like.group(1)
-
-# 8) Dettagli/keyword (opzionale: usa KEYWORDS se esiste nel tuo script)
-details = []
-try:
-    for label, patterns in KEYWORDS.items():  # KEYWORDS deve essere definito nel tuo file
-        for pattern in patterns:
-            if re.search(pattern, full_text, re.I):
-                details.append(label)
-                break
-except NameError:
-    details = []  # Se non hai KEYWORDS, lascia vuoto
-
-# 9) Immagini (prendi qualche src valido)
-imgs = []
-for img in s.find_all("img"):
-    src = (img.get("src") or "").strip()
-    if src.startswith("http"):
-        imgs.append(src)
-    if len(imgs) >= 5:
-        break
-
-# 10) Label/modello (euristica semplice: dal <title> o h1/h2)
-label = ""
-title_el = s.find(["h1", "h2"]) or s.find("title")
-if title_el:
-    label = title_el.get_text(" ", strip=True)
-if not label:
-    # fallback: parole chiave tipiche
-    m_lbl = re.search(r"(iPhone\s?\d{1,2}\s?(Pro|Pro Max|Mini)?)", full_text, re.I)
-    label = m_lbl.group(1) if m_lbl else "iPhone"
-
-return price, cond, city, date_txt, likes, details, imgs, label, venduto
-```
-
-def send\_announcement(data, link):
-price, cond, city, date, likes, details, imgs, label, venduto = data
-if not imgs:
-print("🚫 Nessuna immagine trovata per", link)
-return
-
-```
-text = (
-    f"<b>📌 {label}</b>\n"
-    f"💶 <b>{price} €</b>\n"
-    f"📆 <i>{date}</i>\n"
-    + ("🔒 <b>VENDUTO</b>\n" if venduto else "")
-    + f"⚙️ Condizione: {cond}\n"
-    + f"📍 Città: {city}\n"
-    + f"💥 Like: {likes}\n"
-    + "━━━━━━━━━━━━━━\n"
-    + "<b>📎 Dettagli tecnici:</b>\n"
-    + ("\n".join(f"• {d}" for d in details) if details else "• Nessun dettaglio rilevante") + "\n"
-    + f"🌐 <a href='{link}'>Apri in Subito</a>"
-)
-
-media = [InputMediaPhoto(imgs[0], caption=text, parse_mode="HTML")] + [InputMediaPhoto(u) for u in imgs[1:]]
-try:
-    key = md5(link.encode()).hexdigest()
-    media_msgs = BOT.send_media_group(CHAT_ID, media)
-    if media_msgs:
-        media_msg_ids = [m.message_id for m in media_msgs]
-        LINK_MAP[key] = (link, media_msg_ids)
+    return price, cond, city, date_txt, likes, details, imgs, label, venduto
 
 
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        msg_testo = "🔘 Vuoi contattare subito?"
-        keyboard = [[
-            InlineKeyboardButton("✅ Yes", callback_data=f"save|{key}"),
-            InlineKeyboardButton("❌ No", callback_data=f"discard|{key}")
-        ]]
-        BOT.send_message(CHAT_ID, msg_testo, reply_markup=InlineKeyboardMarkup(keyboard))
+def send_announcement(data, link):
+    price, cond, city, date, likes, details, imgs, label, venduto = data
+    if not imgs:
+        print("🚫 Nessuna immagine trovata per", link)
+        return
 
-    print("📲 Pulsanti inviati!")
-    status = "[VENDUTO]" if venduto else ""
-    print(f"📤 {label:<20} | 💶 {price} € | 📍 {city} | 📆 {date} {status}")
-    time.sleep(2)
-except TelegramError as e:
-    print("📸 Errore invio immagini:", e)
-  
-```
+    text = (
+        f"<b>📌 {label}</b>\n"
+        f"💶 <b>{price} €</b>\n"
+        f"📆 <i>{date}</i>\n"
+        + ("🔒 <b>VENDUTO</b>\n" if venduto else "")
+        + f"⚙️ Condizione: {cond}\n"
+        + f"📍 Città: {city}\n"
+        + f"💥 Like: {likes}\n"
+        + "━━━━━━━━━━━━━━\n"
+        + "<b>📎 Dettagli tecnici:</b>\n"
+        + ("\n".join(f"• {d}" for d in details) if details else "• Nessun dettaglio rilevante") + "\n"
+        + f"🌐 <a href='{link}'>Apri in Subito</a>"
+    )
 
-def clean\_sold\_announcements(all\_ann):
-to\_remove = []
-for a in all\_ann:
-if a["link"] in saved:
-if "venduto" in a.get("label", "").lower() or a["link"] in discarded:
-to\_remove.append(a["link"])
-for l in to\_remove:
-saved.discard(l)
+    media = [InputMediaPhoto(imgs[0], caption=text, parse_mode="HTML")] + [InputMediaPhoto(u) for u in imgs[1:]]
+    try:
+        key = md5(link.encode()).hexdigest()
+        media_msgs = BOT.send_media_group(CHAT_ID, media)
+        if media_msgs:
+            media_msg_ids = [m.message_id for m in media_msgs]
+            LINK_MAP[key] = (link, media_msg_ids)
 
-def build\_dash(all\_ann):
-txt = "<b>📊 DASHBOARD aggiornata</b>\n\n"
 
-```
-# Sezione 1: 💾 Salvati
-saved_ann = [a for a in all_ann if a["link"] in saved]
-if saved_ann:
-    txt += "💾 <b>ANNUNCI SALVATI</b>\n"
-    for a in saved_ann:
-        txt += f"• {a['label']} — {a['price']} € — {a['city']} — <a href='{a['link']}'>link</a>\n"
-    txt += "\n"
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            msg_testo = "🔘 Vuoi contattare subito?"
+            keyboard = [[
+                InlineKeyboardButton("✅ Yes", callback_data=f"save|{key}"),
+                InlineKeyboardButton("❌ No", callback_data=f"discard|{key}")
+            ]]
+            BOT.send_message(CHAT_ID, msg_testo, reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Sezione 2: 🔥 Annunci Caldi (20% migliori per prezzo + like)
-filtered = [a for a in all_ann if a["link"] not in discarded and a["link"] not in saved]
-if len(filtered) >= 5:
-    sorted_prices = sorted(a["price"] for a in filtered)
-    price_threshold = sorted_prices[max(1, len(sorted_prices) // 5)]
+        print("📲 Pulsanti inviati!")
+        status = "[VENDUTO]" if venduto else ""
+        print(f"📤 {label:<20} | 💶 {price} € | 📍 {city} | 📆 {date} {status}")
+        time.sleep(2)
+    except TelegramError as e:
+        print("📸 Errore invio immagini:", e)
+      
+def clean_sold_announcements(all_ann):
+    to_remove = []
+    for a in all_ann:
+        if a["link"] in saved:
+            if "venduto" in a.get("label", "").lower() or a["link"] in discarded:
+                to_remove.append(a["link"])
+    for l in to_remove:
+        saved.discard(l)
 
-    hot = [a for a in filtered if a["price"] <= price_threshold]
-    # Simula "calore" con prezzo basso e like alto (likes come stringa, li forziamo a int)
-    hot_sorted = sorted(hot, key=lambda x: (x["price"], -int(x.get("likes", "0"))))
-    if hot_sorted:
-        txt += "🔥 <b>ANNUNCI CALDI</b>\n"
-        for a in hot_sorted[:5]:
+def build_dash(all_ann):
+    txt = "<b>📊 DASHBOARD aggiornata</b>\n\n"
+
+    # Sezione 1: 💾 Salvati
+    saved_ann = [a for a in all_ann if a["link"] in saved]
+    if saved_ann:
+        txt += "💾 <b>ANNUNCI SALVATI</b>\n"
+        for a in saved_ann:
             txt += f"• {a['label']} — {a['price']} € — {a['city']} — <a href='{a['link']}'>link</a>\n"
         txt += "\n"
 
-return txt
-```
+    # Sezione 2: 🔥 Annunci Caldi (20% migliori per prezzo + like)
+    filtered = [a for a in all_ann if a["link"] not in discarded and a["link"] not in saved]
+    if len(filtered) >= 5:
+        sorted_prices = sorted(a["price"] for a in filtered)
+        price_threshold = sorted_prices[max(1, len(sorted_prices) // 5)]
 
-last\_dash\_msg\_id = None  # aggiungi questa riga tra le variabili globali in alto
+        hot = [a for a in filtered if a["price"] <= price_threshold]
+        # Simula "calore" con prezzo basso e like alto (likes come stringa, li forziamo a int)
+        hot_sorted = sorted(hot, key=lambda x: (x["price"], -int(x.get("likes", "0"))))
+        if hot_sorted:
+            txt += "🔥 <b>ANNUNCI CALDI</b>\n"
+            for a in hot_sorted[:5]:
+                txt += f"• {a['label']} — {a['price']} € — {a['city']} — <a href='{a['link']}'>link</a>\n"
+            txt += "\n"
 
-def send\_dash(all\_ann):
-global last\_dash, last\_dash\_msg\_id
+    return txt
 
-```
-clean_sold_announcements(all_ann)
+last_dash_msg_id = None  # aggiungi questa riga tra le variabili globali in alto
 
-sections = {"saved": [], "hot": [], "unhandled": []}
+def send_dash(all_ann):
+    global last_dash, last_dash_msg_id
 
-for a in all_ann:
-    if a["link"] in saved:
-        sections["saved"].append(a)
-    elif a["link"] in discarded:
-        continue
-    else:
-        sections["unhandled"].append(a)
+    clean_sold_announcements(all_ann)
 
-filtered = sections["unhandled"]
-if len(filtered) >= 5:
-    sorted_prices = sorted(a["price"] for a in filtered)
-    threshold = sorted_prices[max(1, len(sorted_prices) // 5)]
-    hot = [a for a in filtered if a["price"] <= threshold]
-    hot_sorted = sorted(hot, key=lambda x: (x["price"], -int(x.get("likes", "0"))))
-    sections["hot"] = hot_sorted[:5]
+    sections = {"saved": [], "hot": [], "unhandled": []}
 
-# Costruzione messaggio compatto
-txt = "<b>📊 DASHBOARD aggiornata</b>\n\n"
-
-txt += section_block("💾 <b>ANNUNCI SALVATI</b>", "saved", sections)
-txt += section_block("🔥 <b>ANNUNCI CALDI</b>", "hot", sections)
-
-
-# Elimina messaggio precedente
-if last_dash_msg_id:
-    try:
-        BOT.delete_message(GROUP_ID, last_dash_msg_id)
-    except:
-        pass
-
-msg = BOT.send_message(GROUP_ID, txt, parse_mode="HTML", disable_web_page_preview=True)
-last_dash_msg_id = msg.message_id
-last_dash = time.time()
-# Invia anche i caldi nella terza chat se non già presenti
-```
-
-def section\_block(title, key, sections):
-righe = ""
-for a in sections[key]:
-label = a['label']
-prezzo = a['price']
-citta = a['city']
-link = a['link']
-url = link
-righe += f"• {label} — {prezzo} € — {citta} — <a href='{url}'>🔗</a> | <a href='https://t.me/{BOT.username}?start=discard_{md5(link.encode()).hexdigest()}'>🗑️</a>\n"
-return f"{title}\n{righe}\n" if righe else ""
-
-def button\_handler(update, context):
-global all\_ann
-query = update.callback\_query
-if not query:
-return
-
-```
-action, key = query.data.split("|")
-link, media_msg_ids = LINK_MAP.get(key, (None, []))
-if not link:
-    query.answer("❌ Errore interno")
-    return
-  
-if action == "discard_saved":
-   link, media_msg_ids = LINK_MAP.get(key, (None, []))
-   if not link:
-       query.answer("❌ Errore interno")
-       return
-   discarded.add(link)
-   saved.discard(link)
-   save_json("discarded.json", discarded)
-   save_json("saved.json", saved)
-   query.answer("🗑️ Scartato dai salvati!")
-   try:
-       BOT.delete_message(query.message.chat_id, query.message.message_id)
-   except:
-       pass
-   send_dash(all_ann)
-   return
-
-if action == "save":
-    saved.add(link)
-    save_json("saved.json", saved)
-    query.answer("🔖 Salvato!")
-    try:
-        BOT.delete_message(query.message.chat_id, query.message.message_id)
-        for msg_id in media_msg_ids:
-            try:
-                BOT.delete_message(query.message.chat_id, msg_id)
-            except:
-                pass
-
-        price, cond, city, date, likes, details, imgs, label, venduto = extract(link)
-        if not any(a["link"] == link for a in all_ann):
-            all_ann.append({"label": label, "price": price, "city": city, "link": link, "likes": likes})
-        send_dash(all_ann)
-
-    except Exception as e:
-        print("⚠️ Errore salvataggio o invio nella terza chat:", e)
-
-elif action == "discard":
-    discarded.add(link)
-    saved.discard(link)  # ✅ se era salvato lo togliamo
-    save_json("discarded.json", discarded)
-    save_json("saved.json", saved)
-    query.answer("🚫 Scartato!")
-
-    try:
-        BOT.delete_message(query.message.chat_id, query.message.message_id)
-        for msg_id in media_msg_ids:
-            try:
-                BOT.delete_message(query.message.chat_id, msg_id)
-            except:
-                pass
-        send_dash(all_ann)  # aggiorna la dashboard
-    except Exception as e:
-        print("❌ Errore eliminazione:", e)
-```
-
-def dash\_filter(update, context):
-cmd = update.message.text.lower().strip()
-section = None
-if "/salvati" in cmd:
-section = "saved"
-elif "/caldi" in cmd:
-section = "hot"
-elif "/valutare" in cmd:
-section = "unhandled"
-else:
-BOT.send\_message(update.effective\_chat.id, "❓ Comando non valido.")
-return
-
-```
-filtered_ann = []
-if section == "saved":
-    filtered_ann = [a for a in all_ann if a["link"] in saved]
-elif section == "unhandled":
-    filtered_ann = [a for a in all_ann if a["link"] not in saved and a["link"] not in discarded]
-elif section == "hot":
-    temp = [a for a in all_ann if a["link"] not in saved and a["link"] not in discarded]
-    if len(temp) >= 5:
-        sorted_prices = sorted(a["price"] for a in temp)
-        threshold = sorted_prices[max(1, len(sorted_prices) // 5)]
-        filtered_ann = [a for a in temp if a["price"] <= threshold]
-
-if not filtered_ann:
-    BOT.send_message(update.effective_chat.id, "⚠️ Nessun annuncio trovato.")
-    return
-
-txt = f"<b>📂 {section.upper()} ({len(filtered_ann)})</b>\n\n"
-for a in filtered_ann[:10]:
-    txt += f"• {a['label']} — {a['price']} € — {a['city']} — <a href='{a['link']}'>🌐</a>\n"
-
-BOT.send_message(update.effective_chat.id, txt, parse_mode="HTML")
-```
-
-all\_ann = []
-
-def clear\_dashboard(update, context):
-global last\_dash\_msg\_id
-if last\_dash\_msg\_id:
-try:
-BOT.delete\_message(GROUP\_ID, last\_dash\_msg\_id)
-last\_dash\_msg\_id = None
-BOT.send\_message(update.effective\_chat.id, "🧹 Dashboard pulita!")
-except Exception as e:
-BOT.send\_message(update.effective\_chat.id, f"⚠️ Non sono riuscito a cancellare la dashboard: {e}")
-else:
-BOT.send\_message(update.effective\_chat.id, "ℹ️ Nessuna dashboard da pulire.")
-
-\#/salvati → mostra i preferiti
-\#/caldi → mostra i più caldi
-\#/valutare → da valutare
-\#/recover → recupera gli scartati
-\#/reset → svuota tutta la memoria
-\#/cleandash → cancella la dashboard manualmente
-
-def main():
-global last\_dash
-
-```
-# Diagnostica avvio
-try:
-    me = BOT.get_me()
-    print("BOT get_me():", me)
-except Exception as e:
-    print("BOT get_me() FAILED:", e)
-    raise
-
-for cid in (GROUP_ID, CHAT_ID):
-    try:
-        BOT.send_message(cid, "🟢 Avvio bot (ping semplice)")
-        print("OK send_message to", cid)
-    except Exception as e:
-        print("FAIL send_message to", cid, "->", repr(e))
-        raise
-
-print("🚀 Bot attivo e in ascolto...")
-
-from telegram.ext import MessageHandler, Filters, CommandHandler
-from threading import Thread
-
-updater = Updater(TOKEN, use_context=True)
-dispatcher: Dispatcher = updater.dispatcher
-dispatcher.add_handler(MessageHandler(Filters.text & Filters.regex(r"^/start discard_"), handle_start))
-dispatcher.add_handler(CallbackQueryHandler(button_handler))
-dispatcher.add_handler(CommandHandler("reset", reset_data))
-dispatcher.add_handler(CommandHandler("recover", recover_discarded))
-dispatcher.add_handler(CommandHandler("salvati", dash_filter))
-dispatcher.add_handler(CommandHandler("caldi", dash_filter))
-dispatcher.add_handler(CommandHandler("valutare", dash_filter))
-dispatcher.add_handler(CommandHandler("cleandash", clear_dashboard))
-
-Thread(target=updater.start_polling, daemon=True).start()
-
-while True:
-    for s in SEARCHES:
-        if not s.get("enabled", True):
+    for a in all_ann:
+        if a["link"] in saved:
+            sections["saved"].append(a)
+        elif a["link"] in discarded:
             continue
+        else:
+            sections["unhandled"].append(a)
 
-        found = 0
-        print(f"\n📦 {datetime.now().strftime('%d/%m %H:%M')} • Ricerca: {s['label']}")
-        print(f"🔍 URL: {s['url']}")
+    filtered = sections["unhandled"]
+    if len(filtered) >= 5:
+        sorted_prices = sorted(a["price"] for a in filtered)
+        threshold = sorted_prices[max(1, len(sorted_prices) // 5)]
+        hot = [a for a in filtered if a["price"] <= threshold]
+        hot_sorted = sorted(hot, key=lambda x: (x["price"], -int(x.get("likes", "0"))))
+        sections["hot"] = hot_sorted[:5]
 
+    # Costruzione messaggio compatto
+    txt = "<b>📊 DASHBOARD aggiornata</b>\n\n"
+
+    txt += section_block("💾 <b>ANNUNCI SALVATI</b>", "saved", sections)
+    txt += section_block("🔥 <b>ANNUNCI CALDI</b>", "hot", sections)
+
+
+    # Elimina messaggio precedente
+    if last_dash_msg_id:
         try:
-            html = fetch_html_browser(s["url"], wait_ms=5000, scrolls=2)
-            soup = BeautifulSoup(html, "lxml")
-            print("DEBUG: anchor annunci =", len(soup.select("a[href*='/annunci/']")))
-            anchors = soup.select("a[href*='/annunci/']")
-            if not anchors:
-                # fallback: alcuni listing usano card con role=link o <a> senza href completo
-                anchors = soup.select("a[role='link'], a[href]")
-            print("DEBUG: anchor (fallback) =", len(anchors))
+            BOT.delete_message(GROUP_ID, last_dash_msg_id)
+        except:
+            pass
 
-            links = set()
-            for a in anchors:
-                href = a.get("href")
-                if not href:
-                    continue
-                if not href.startswith("http"):
-                    href = "https://www.subito.it" + href
-                href = href.split("?")[0].rstrip("/")
-                if "/annunci/" in href and "/preferiti" not in href:
-                    links.add(href)
+    msg = BOT.send_message(GROUP_ID, txt, parse_mode="HTML", disable_web_page_preview=True)
+    last_dash_msg_id = msg.message_id
+    last_dash = time.time()
+    # Invia anche i caldi nella terza chat se non già presenti
 
-            links = list(links)
-            print("DEBUG: link trovati =", len(links))
+def section_block(title, key, sections):
+    righe = ""
+    for a in sections[key]:
+        label = a['label']
+        prezzo = a['price']
+        citta = a['city']
+        link = a['link']
+        url = link
+        righe += f"• {label} — {prezzo} € — {citta} — <a href='{url}'>🔗</a> | <a href='https://t.me/{BOT.username}?start=discard_{md5(link.encode()).hexdigest()}'>🗑️</a>\n"
+    return f"{title}\n{righe}\n" if righe else ""
 
-            for link in links:
-                if link in seen or link in discarded:
-                    continue
+def button_handler(update, context):
+    global all_ann
+    query = update.callback_query
+    if not query:
+        return
+      
+    action, key = query.data.split("|")
+    link, media_msg_ids = LINK_MAP.get(key, (None, []))
+    if not link:
+        query.answer("❌ Errore interno")
+        return
+      
+    if action == "discard_saved":
+       link, media_msg_ids = LINK_MAP.get(key, (None, []))
+       if not link:
+           query.answer("❌ Errore interno")
+           return
+       discarded.add(link)
+       saved.discard(link)
+       save_json("discarded.json", discarded)
+       save_json("saved.json", saved)
+       query.answer("🗑️ Scartato dai salvati!")
+       try:
+           BOT.delete_message(query.message.chat_id, query.message.message_id)
+       except:
+           pass
+       send_dash(all_ann)
+       return
+
+    if action == "save":
+        saved.add(link)
+        save_json("saved.json", saved)
+        query.answer("🔖 Salvato!")
+        try:
+            BOT.delete_message(query.message.chat_id, query.message.message_id)
+            for msg_id in media_msg_ids:
                 try:
-                    price, cond, city, date, likes, details, imgs, model, venduto = extract(link)
+                    BOT.delete_message(query.message.chat_id, msg_id)
+                except:
+                    pass
 
-                    if s["label"].lower() != model.lower():
-                        continue
-
-                    parsed = parse_date(date)
-                    if parsed and (datetime.now() - parsed).days > 2:
-                        continue
-
-                    if not (s["min"] <= price <= s["max"]):
-                        continue
-
-                    seen.add(link)
-                    found += 1
-                    if not any(a["link"] == link for a in all_ann):
-                        all_ann.append({
-                            "label": model,
-                            "price": price,
-                            "city": city,
-                            "link": link,
-                            "likes": likes
-                        })
-
-                    send_announcement(
-                        (price, cond, city, date, likes, details, imgs, model, venduto),
-                        link
-                    )
-                    time.sleep(2)
-
-                except Exception as e:
-                    print("❌ Errore annuncio:", link, "|", e)
+            price, cond, city, date, likes, details, imgs, label, venduto = extract(link)
+            if not any(a["link"] == link for a in all_ann):
+                all_ann.append({"label": label, "price": price, "city": city, "link": link, "likes": likes})
+            send_dash(all_ann)
 
         except Exception as e:
-            print("❌ Errore lista:", e)
+            print("⚠️ Errore salvataggio o invio nella terza chat:", e)
 
-        if found:
-            print(f"✅ Trovati: {found} annunci validi")
-        else:
-            print("🛑 Nessun annuncio valido")
-        print("────────────────────────────────────────────")
+    elif action == "discard":
+        discarded.add(link)
+        saved.discard(link)  # ✅ se era salvato lo togliamo
+        save_json("discarded.json", discarded)
+        save_json("saved.json", saved)
+        query.answer("🚫 Scartato!")
 
-    save_seen()
-    if time.time() - last_dash > DASH_INTERVAL:
-        send_dash(all_ann)
-    time.sleep(60)
-  
-```
+        try:
+            BOT.delete_message(query.message.chat_id, query.message.message_id)
+            for msg_id in media_msg_ids:
+                try:
+                    BOT.delete_message(query.message.chat_id, msg_id)
+                except:
+                    pass
+            send_dash(all_ann)  # aggiorna la dashboard
+        except Exception as e:
+            print("❌ Errore eliminazione:", e)
 
-def reset\_data(update, context):
-global saved, discarded, seen, all\_ann
-saved = set()
-discarded = set()
-seen = set()
-all\_ann = []
-save\_json("saved.json", saved)
-save\_json("discarded.json", discarded)
-save\_json(DATABASE, seen)
-BOT.send\_message(update.effective\_chat.id, "♻️ Memoria svuotata!")
+def dash_filter(update, context):
+    cmd = update.message.text.lower().strip()
+    section = None
+    if "/salvati" in cmd:
+        section = "saved"
+    elif "/caldi" in cmd:
+        section = "hot"
+    elif "/valutare" in cmd:
+        section = "unhandled"
+    else:
+        BOT.send_message(update.effective_chat.id, "❓ Comando non valido.")
+        return
 
-def recover\_discarded(update, context):
-lista = [a for a in reversed(all\_ann) if a["link"] in discarded]
-if not lista:
-BOT.send\_message(update.effective\_chat.id, "✅ Nessun annuncio scartato.")
-return
+    filtered_ann = []
+    if section == "saved":
+        filtered_ann = [a for a in all_ann if a["link"] in saved]
+    elif section == "unhandled":
+        filtered_ann = [a for a in all_ann if a["link"] not in saved and a["link"] not in discarded]
+    elif section == "hot":
+        temp = [a for a in all_ann if a["link"] not in saved and a["link"] not in discarded]
+        if len(temp) >= 5:
+            sorted_prices = sorted(a["price"] for a in temp)
+            threshold = sorted_prices[max(1, len(sorted_prices) // 5)]
+            filtered_ann = [a for a in temp if a["price"] <= threshold]
 
-```
-text = "<b>♻️ Annunci scartati</b>\n\n"
-for a in lista[:10]:
-    key = md5(a["link"].encode()).hexdigest()
-    text += f"• {a['label']} — {a['price']} € — {a['city']} — <a href='https://t.me/{BOT.username}?start=discard_{key}'>♻️ Recupera</a>\n"
+    if not filtered_ann:
+        BOT.send_message(update.effective_chat.id, "⚠️ Nessun annuncio trovato.")
+        return
 
-BOT.send_message(update.effective_chat.id, text, parse_mode="HTML", disable_web_page_preview=True)
-```
+    txt = f"<b>📂 {section.upper()} ({len(filtered_ann)})</b>\n\n"
+    for a in filtered_ann[:10]:
+        txt += f"• {a['label']} — {a['price']} € — {a['city']} — <a href='{a['link']}'>🌐</a>\n"
 
-def handle\_start(update, context):
-text = update.message.text
-if text.startswith("/start discard\_"):
-key = text.split("discard\_")[1]
-for a in all\_ann:
-if md5(a["link"].encode()).hexdigest() == key:
-link = a["link"]
-discarded.discard(link)
-save\_json("discarded.json", discarded)
+    BOT.send_message(update.effective_chat.id, txt, parse_mode="HTML")
 
-```
-            # Reinvia l'annuncio da valutare
+all_ann = []
+
+def clear_dashboard(update, context):
+    global last_dash_msg_id
+    if last_dash_msg_id:
+        try:
+            BOT.delete_message(GROUP_ID, last_dash_msg_id)
+            last_dash_msg_id = None
+            BOT.send_message(update.effective_chat.id, "🧹 Dashboard pulita!")
+        except Exception as e:
+            BOT.send_message(update.effective_chat.id, f"⚠️ Non sono riuscito a cancellare la dashboard: {e}")
+    else:
+        BOT.send_message(update.effective_chat.id, "ℹ️ Nessuna dashboard da pulire.")
+
+#/salvati → mostra i preferiti
+#/caldi → mostra i più caldi
+#/valutare → da valutare
+#/recover → recupera gli scartati
+#/reset → svuota tutta la memoria
+#/cleandash → cancella la dashboard manualmente
+
+def main():
+    global last_dash
+
+    # Diagnostica avvio
+    try:
+        me = BOT.get_me()
+        print("BOT get_me():", me)
+    except Exception as e:
+        print("BOT get_me() FAILED:", e)
+        raise
+
+    for cid in (GROUP_ID, CHAT_ID):
+        try:
+            BOT.send_message(cid, "🟢 Avvio bot (ping semplice)")
+            print("OK send_message to", cid)
+        except Exception as e:
+            print("FAIL send_message to", cid, "->", repr(e))
+            raise
+
+    print("🚀 Bot attivo e in ascolto...")
+
+    from telegram.ext import MessageHandler, Filters, CommandHandler
+    from threading import Thread
+
+    updater = Updater(TOKEN, use_context=True)
+    dispatcher: Dispatcher = updater.dispatcher
+    dispatcher.add_handler(MessageHandler(Filters.text & Filters.regex(r"^/start discard_"), handle_start))
+    dispatcher.add_handler(CallbackQueryHandler(button_handler))
+    dispatcher.add_handler(CommandHandler("reset", reset_data))
+    dispatcher.add_handler(CommandHandler("recover", recover_discarded))
+    dispatcher.add_handler(CommandHandler("salvati", dash_filter))
+    dispatcher.add_handler(CommandHandler("caldi", dash_filter))
+    dispatcher.add_handler(CommandHandler("valutare", dash_filter))
+    dispatcher.add_handler(CommandHandler("cleandash", clear_dashboard))
+
+    Thread(target=updater.start_polling, daemon=True).start()
+
+    while True:
+        for s in SEARCHES:
+            if not s.get("enabled", True):
+                continue
+
+            found = 0
+            print(f"\n📦 {datetime.now().strftime('%d/%m %H:%M')} • Ricerca: {s['label']}")
+            print(f"🔍 URL: {s['url']}")
+
             try:
-                data = extract(link)
-                send_announcement(data, link)
-                BOT.send_message(update.effective_chat.id, "✅ Annuncio recuperato e rimandato per la valutazione!")
-            except Exception as e:
-                BOT.send_message(update.effective_chat.id, f"⚠️ Errore recupero annuncio: {e}")
-            return
-    BOT.send_message(update.effective_chat.id, "❌ Annuncio non trovato.")
-```
+                html = fetch_html_browser(s["url"], wait_ms=5000, scrolls=2)
+                soup = BeautifulSoup(html, "lxml")
+                print("DEBUG: anchor annunci =", len(soup.select("a[href*='/annunci/']")))
+                anchors = soup.select("a[href*='/annunci/']")
+                if not anchors:
+                    # fallback: alcuni listing usano card con role=link o <a> senza href completo
+                    anchors = soup.select("a[role='link'], a[href]")
+                print("DEBUG: anchor (fallback) =", len(anchors))
 
-if **name** == "**main**":
-main()
+                links = set()
+                for a in anchors:
+                    href = a.get("href")
+                    if not href:
+                        continue
+                    if not href.startswith("http"):
+                        href = "https://www.subito.it" + href
+                    href = href.split("?")[0].rstrip("/")
+                    if "/annunci/" in href and "/preferiti" not in href:
+                        links.add(href)
+
+                links = list(links)
+                print("DEBUG: link trovati =", len(links))
+
+                for link in links:
+                    if link in seen or link in discarded:
+                        continue
+                    try:
+                        price, cond, city, date, likes, details, imgs, model, venduto = extract(link)
+
+                        if s["label"].lower() != model.lower():
+                            continue
+
+                        parsed = parse_date(date)
+                        if parsed and (datetime.now() - parsed).days > 2:
+                            continue
+
+                        if not (s["min"] <= price <= s["max"]):
+                            continue
+
+                        seen.add(link)
+                        found += 1
+                        if not any(a["link"] == link for a in all_ann):
+                            all_ann.append({
+                                "label": model,
+                                "price": price,
+                                "city": city,
+                                "link": link,
+                                "likes": likes
+                            })
+
+                        send_announcement(
+                            (price, cond, city, date, likes, details, imgs, model, venduto),
+                            link
+                        )
+                        time.sleep(2)
+
+                    except Exception as e:
+                        print("❌ Errore annuncio:", link, "|", e)
+
+            except Exception as e:
+                print("❌ Errore lista:", e)
+
+            if found:
+                print(f"✅ Trovati: {found} annunci validi")
+            else:
+                print("🛑 Nessun annuncio valido")
+            print("────────────────────────────────────────────")
+
+        save_seen()
+        if time.time() - last_dash > DASH_INTERVAL:
+            send_dash(all_ann)
+        time.sleep(60)
+      
+def reset_data(update, context):
+    global saved, discarded, seen, all_ann
+    saved = set()
+    discarded = set()
+    seen = set()
+    all_ann = []
+    save_json("saved.json", saved)
+    save_json("discarded.json", discarded)
+    save_json(DATABASE, seen)
+    BOT.send_message(update.effective_chat.id, "♻️ Memoria svuotata!")
+
+def recover_discarded(update, context):
+    lista = [a for a in reversed(all_ann) if a["link"] in discarded]
+    if not lista:
+        BOT.send_message(update.effective_chat.id, "✅ Nessun annuncio scartato.")
+        return
+
+    text = "<b>♻️ Annunci scartati</b>\n\n"
+    for a in lista[:10]:
+        key = md5(a["link"].encode()).hexdigest()
+        text += f"• {a['label']} — {a['price']} € — {a['city']} — <a href='https://t.me/{BOT.username}?start=discard_{key}'>♻️ Recupera</a>\n"
+
+    BOT.send_message(update.effective_chat.id, text, parse_mode="HTML", disable_web_page_preview=True)
+
+def handle_start(update, context):
+    text = update.message.text
+    if text.startswith("/start discard_"):
+        key = text.split("discard_")[1]
+        for a in all_ann:
+            if md5(a["link"].encode()).hexdigest() == key:
+                link = a["link"]
+                discarded.discard(link)
+                save_json("discarded.json", discarded)
+
+                # Reinvia l'annuncio da valutare
+                try:
+                    data = extract(link)
+                    send_announcement(data, link)
+                    BOT.send_message(update.effective_chat.id, "✅ Annuncio recuperato e rimandato per la valutazione!")
+                except Exception as e:
+                    BOT.send_message(update.effective_chat.id, f"⚠️ Errore recupero annuncio: {e}")
+                return
+        BOT.send_message(update.effective_chat.id, "❌ Annuncio non trovato.")
+
+if __name__ == "__main__":
+    main()
+
