@@ -7,7 +7,7 @@ from telegram import Bot, InputMediaPhoto
 from telegram.error import TelegramError
 from telegram.ext import Updater, CallbackQueryHandler, Dispatcher
 from hashlib import md5
-LINK\_MAP = {}
+LINK_MAP = {}
 
 import re, time
 from playwright.sync\_api import sync\_playwright
