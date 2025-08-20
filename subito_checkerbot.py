@@ -8,6 +8,7 @@ from telegram import Bot, InputMediaPhoto
 from telegram.error import TelegramError
 from telegram.ext import Updater, CallbackQueryHandler, Dispatcher
 from hashlib import md5
+from urllib.parse import urljoin
 LINK_MAP = {}
 
 import re, time
@@ -16,151 +17,63 @@ from playwright.sync_api import sync_playwright
 import re
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
+import re, os, time
 
-# Clicca il banner cookie se appare
 def _click_cookies(page):
-    patterns = [
-        r"Accetta.*tutti", r"Accetta", r"Consenti", r"OK", r"Accept",
-        r"Rifiuta.*non necessario", r"Continua.*senza accettare"
-    ]
-    # prova bottoni per ruolo/nome
-    for pat in patterns:
-        try:
+    try:
+        # CMP Sourcepoint spesso è in un iframe "sp_message_iframe..."
+        for sel in [
+            "iframe[id^='sp_message_iframe']",
+            "iframe[title*='Consent']",
+            "iframe[src*='sp_message']",
+        ]:
+            try:
+                fl = page.frame_locator(sel)
+                fl.get_by_role("button", name=re.compile(r"Accett|Consenti|Accept", re.I)).click(timeout=1500)
+                return
+            except Exception:
+                pass
+
+        # fallback: banner nel main frame
+        for pat in [r"Accetta.*tutti", r"Accetta", r"Consenti", r"OK", r"Accept"]:
             page.get_by_role("button", name=re.compile(pat, re.I)).click(timeout=1200)
-            page.wait_for_timeout(300)
             return
-        except:
-            pass
-    # fallback CSS comuni
-    for sel in [
-        "button:has-text('Accetta')",
-        "button:has-text('Consenti')",
-        "button:has-text('OK')",
-        "[data-testid*=cookie] button",
-        "[id*='consent'] button",
-    ]:
-        try:
-            page.locator(sel).first.click(timeout=1200)
-            page.wait_for_timeout(300)
-            return
-        except:
-            pass
+    except Exception:
+        pass
 
-def fetch_html_browser(url: str, wait_ms: int = 2500, scrolls: int = 0) -> str:
-    from playwright.sync_api import sync_playwright
-    import re, time, os
-
-    def human_ua():
-        # UA recente Chrome su Linux (va bene in VM)
-        return ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-
+def fetch_html_browser(url: str, wait_ms: int = 2500, scrolls: int = 2) -> str:
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-        ])
+        browser = p.chromium.launch(headless=True)
         ctx = browser.new_context(
             locale="it-IT",
             timezone_id="Europe/Rome",
-            user_agent=human_ua(),
-            viewport={"width": 1280, "height": 2000},
-            extra_http_headers={
-                "Accept-Language": "it-IT,it;q=0.9",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-            }
+            viewport={"width": 1280, "height": 1800},
         )
-
-        # Rimuovi tracce di automation (navigator.webdriver etc.)
-        ctx.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            window.chrome = window.chrome || { runtime: {} };
-            const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
-            if (originalQuery) {
-              window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                  Promise.resolve({ state: Notification.permission }) :
-                  originalQuery(parameters)
-              );
-            }
-        """)
-
         page = ctx.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-
-        # Attendi rete quieta: molte card arrivano via XHR.
-        page.wait_for_load_state("networkidle", timeout=20000)  # docs: networkidle :contentReference[oaicite:1]{index=1}
-
-        # Cookie banner: prova vari fallback
-        def try_click_cookies():
-            tried = False
-            patterns = [r"Accetta.*tutti", r"Accetta", r"Consenti", r"OK", r"Accept"]
-            for pat in patterns:
-                try:
-                    page.get_by_role("button", name=re.compile(pat, re.I)).click(timeout=1200)
-                    tried = True
-                    break
-                except:
-                    pass
-            # selettori comuni CMP (Didomi/OneTrust ecc.)
-            for sel in [
-                "[id*='didomi'] [data-testid*='accept']",
-                "[class*='didomi'] button:has-text('Accetta')",
-                "button:has-text('Accetta')",
-                "button[aria-label*='Accetta']",
-                "[id*='onetrust-accept-btn-handler']",
-                ".ot-sdk-container #onetrust-accept-btn-handler",
-            ]:
-                try:
-                    page.locator(sel).first.click(timeout=1000)
-                    tried = True
-                    break
-                except:
-                    pass
-            return tried
-
-        try_click_cookies()
+        page.goto(url, wait_until="networkidle", timeout=60000)  # aspetta richieste rete finite
+        _click_cookies(page)
         page.wait_for_timeout(wait_ms)
 
-        # Scroll progressivo finché non compaiono ancore verso /annunci/
-        prev_cnt = 0
-        for i in range(12):  # fino ~12 scroll
-            cnt = page.locator("a[href*='/annunci/']").count()
-            if cnt > 0:
-                break
-            # scroll giù
-            page.evaluate("window.scrollBy(0, document.body.scrollHeight * 0.9)")
+        for _ in range(scrolls):
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             page.wait_for_timeout(1200)
-            # a volte serve “risvegliare” lazy load
-            page.mouse.wheel(0, 2000)
-            page.wait_for_timeout(800)
-            # se bloccato da cookie, riprova click
-            try_click_cookies()
-            # se non cresce più, fermati
-            if cnt == prev_cnt and i >= 6:
-                break
-            prev_cnt = cnt
 
-        # Ultimo tentativo: attendi specificamente un anchor
+        # aspetta che compaiano i link ai dettagli (terminano in .htm)
         try:
-            page.wait_for_selector("a[href*='/annunci/']", timeout=4000)
-        except:
+            page.wait_for_selector("a[href$='.htm']", timeout=5000)
+        except Exception:
             pass
 
         html = page.content()
 
-        # DIAGNOSTICA: se ancora zero anchor, salva per debug
+        # debug utili (li hai già visti in /tmp/subito-debug)
         try:
-            anchors = page.locator("a[href*='/annunci/']").count()
-            if anchors == 0:
-                os.makedirs("/tmp/subito-debug", exist_ok=True)
-                ts = str(int(time.time()))
-                page.screenshot(path=f"/tmp/subito-debug/list_{ts}.png", full_page=True)
-                open(f"/tmp/subito-debug/list_{ts}.html", "w").write(html)
-                print(f"DEBUG: anchor=0, salvato /tmp/subito-debug/list_{ts}.png e .html")
-        except:
+            os.makedirs("/tmp/subito-debug", exist_ok=True)
+            stamp = str(int(time.time()))
+            page.screenshot(path=f"/tmp/subito-debug/list_{stamp}.png", full_page=True)
+            with open(f"/tmp/subito-debug/list_{stamp}.html", "w", encoding="utf-8") as f:
+                f.write(html)
+        except Exception:
             pass
 
         ctx.close()
@@ -811,76 +724,89 @@ def main():
             try:
                 html = fetch_html_browser(s["url"], wait_ms=5000, scrolls=2)
                 soup = BeautifulSoup(html, "lxml")
-                print("DEBUG: anchor annunci =", len(soup.select("a[href*='/annunci/']")))
-                anchors = soup.select("a[href*='/annunci/']")
-                if not anchors:
-                    # fallback: alcuni listing usano card con role=link o <a> senza href completo
-                    anchors = soup.select("a[role='link'], a[href]")
-                print("DEBUG: anchor (fallback) =", len(anchors))
-
+              
+                # --- ESTRAZIONE LINK (NUOVA) ---
                 links = set()
-                for a in anchors:
+                
+                # 1) Link “sicuri” ai dettagli: spesso terminano in .htm
+                for a in soup.select("a[href$='.htm']"):
                     href = a.get("href")
                     if not href:
                         continue
-                    if not href.startswith("http"):
-                        href = "https://www.subito.it" + href
-                    href = href.split("?")[0].rstrip("/")
-                    if "/annunci/" in href and "/preferiti" not in href:
-                        links.add(href)
-
-                links = list(links)
-                print("DEBUG: link trovati =", len(links))
-
-                for link in links:
-                    if link in seen or link in discarded:
+                    u = urljoin("https://www.subito.it", href)
+                    u = u.split("?")[0].rstrip("/")
+                    if "/annunci/" in u:
+                        links.add(u)
+                
+                # 2) Link generici con pattern /annunci/ o /vi/ (alcune varianti)
+                for a in soup.select("a[href*='/annunci/'], a[href*='/vi/']"):
+                    href = a.get("href")
+                    if not href:
                         continue
-                    try:
-                        price, cond, city, date, likes, details, imgs, model, venduto = extract(link)
-
-                        if s["label"].lower() != model.lower():
-                            continue
-
-                        parsed = parse_date(date)
-                        if parsed and (datetime.now() - parsed).days > 2:
-                            continue
-
-                        if not (s["min"] <= price <= s["max"]):
-                            continue
-
-                        seen.add(link)
-                        found += 1
-                        if not any(a["link"] == link for a in all_ann):
-                            all_ann.append({
-                                "label": model,
-                                "price": price,
-                                "city": city,
-                                "link": link,
-                                "likes": likes
-                            })
-
-                        send_announcement(
-                            (price, cond, city, date, likes, details, imgs, model, venduto),
-                            link
-                        )
-                        time.sleep(2)
-
-                    except Exception as e:
-                        print("❌ Errore annuncio:", link, "|", e)
-
-            except Exception as e:
-                print("❌ Errore lista:", e)
-
-            if found:
-                print(f"✅ Trovati: {found} annunci validi")
-            else:
-                print("🛑 Nessun annuncio valido")
-            print("────────────────────────────────────────────")
-
-        save_seen()
-        if time.time() - last_dash > DASH_INTERVAL:
-            send_dash(all_ann)
-        time.sleep(60)
+                    u = urljoin("https://www.subito.it", href)
+                    u = u.split("?")[0].rstrip("/")
+                    if "/annunci/" in u:
+                        links.add(u)
+                
+                # 3) Fallback “grezzo”: regex su tutto l’HTML (prende qualunque URL annuncio .htm)
+                for m in re.finditer(r"https?://(?:www\\.)?subito\\.it/[^\s\"'<>]*/annunci/[^\s\"'<>]*?\\.htm", html, re.I):
+                    u = m.group(0).split("?")[0].rstrip("/")
+                    links.add(u)
+                
+                # Filtra cose inutili e duplichi
+                links = [u for u in links if "/preferiti" not in u and "/my" not in u]
+                print("DEBUG: link trovati =", len(links))
+                
+                
+                                for link in links:
+                                    if link in seen or link in discarded:
+                                        continue
+                                    try:
+                                        price, cond, city, date, likes, details, imgs, model, venduto = extract(link)
+                
+                                        if s["label"].lower() != model.lower():
+                                            continue
+                
+                                        parsed = parse_date(date)
+                                        if parsed and (datetime.now() - parsed).days > 2:
+                                            continue
+                
+                                        if not (s["min"] <= price <= s["max"]):
+                                            continue
+                
+                                        seen.add(link)
+                                        found += 1
+                                        if not any(a["link"] == link for a in all_ann):
+                                            all_ann.append({
+                                                "label": model,
+                                                "price": price,
+                                                "city": city,
+                                                "link": link,
+                                                "likes": likes
+                                            })
+                
+                                        send_announcement(
+                                            (price, cond, city, date, likes, details, imgs, model, venduto),
+                                            link
+                                        )
+                                        time.sleep(2)
+                
+                                    except Exception as e:
+                                        print("❌ Errore annuncio:", link, "|", e)
+                
+                            except Exception as e:
+                                print("❌ Errore lista:", e)
+                
+                            if found:
+                                print(f"✅ Trovati: {found} annunci validi")
+                            else:
+                                print("🛑 Nessun annuncio valido")
+                            print("────────────────────────────────────────────")
+                
+                        save_seen()
+                        if time.time() - last_dash > DASH_INTERVAL:
+                            send_dash(all_ann)
+                        time.sleep(60)
       
 def reset_data(update, context):
     global saved, discarded, seen, all_ann
