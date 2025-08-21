@@ -698,6 +698,7 @@ def main():
 
     from telegram.ext import MessageHandler, Filters, CommandHandler
     from threading import Thread
+    from urllib.parse import urljoin  # serve per normalizzare gli href
 
     updater = Updater(TOKEN, use_context=True)
     dispatcher: Dispatcher = updater.dispatcher
@@ -724,11 +725,11 @@ def main():
             try:
                 html = fetch_html_browser(s["url"], wait_ms=5000, scrolls=2)
                 soup = BeautifulSoup(html, "lxml")
-              
+
                 # --- ESTRAZIONE LINK (NUOVA) ---
                 links = set()
-                
-                # 1) Link “sicuri” ai dettagli: spesso terminano in .htm
+
+                # 1) Link che terminano in .htm (più “sicuri”)
                 for a in soup.select("a[href$='.htm']"):
                     href = a.get("href")
                     if not href:
@@ -737,8 +738,8 @@ def main():
                     u = u.split("?")[0].rstrip("/")
                     if "/annunci/" in u:
                         links.add(u)
-                
-                # 2) Link generici con pattern /annunci/ o /vi/ (alcune varianti)
+
+                # 2) Pattern generici /annunci/ o /vi/
                 for a in soup.select("a[href*='/annunci/'], a[href*='/vi/']"):
                     href = a.get("href")
                     if not href:
@@ -747,66 +748,69 @@ def main():
                     u = u.split("?")[0].rstrip("/")
                     if "/annunci/" in u:
                         links.add(u)
-                
-                # 3) Fallback “grezzo”: regex su tutto l’HTML (prende qualunque URL annuncio .htm)
-                for m in re.finditer(r"https?://(?:www\\.)?subito\\.it/[^\s\"'<>]*/annunci/[^\s\"'<>]*?\\.htm", html, re.I):
+
+                # 3) Fallback regex direttamente sull'HTML
+                for m in re.finditer(
+                    r"https?://(?:www\.)?subito\.it/[^\s\"'<>]*/annunci/[^\s\"'<>]*?\.htm",
+                    html,
+                    re.I,
+                ):
                     u = m.group(0).split("?")[0].rstrip("/")
                     links.add(u)
-                
-                # Filtra cose inutili e duplichi
+
+                # Filtra link inutili/duplicati
                 links = [u for u in links if "/preferiti" not in u and "/my" not in u]
                 print("DEBUG: link trovati =", len(links))
-                
-                
-                                for link in links:
-                                    if link in seen or link in discarded:
-                                        continue
-                                    try:
-                                        price, cond, city, date, likes, details, imgs, model, venduto = extract(link)
-                
-                                        if s["label"].lower() != model.lower():
-                                            continue
-                
-                                        parsed = parse_date(date)
-                                        if parsed and (datetime.now() - parsed).days > 2:
-                                            continue
-                
-                                        if not (s["min"] <= price <= s["max"]):
-                                            continue
-                
-                                        seen.add(link)
-                                        found += 1
-                                        if not any(a["link"] == link for a in all_ann):
-                                            all_ann.append({
-                                                "label": model,
-                                                "price": price,
-                                                "city": city,
-                                                "link": link,
-                                                "likes": likes
-                                            })
-                
-                                        send_announcement(
-                                            (price, cond, city, date, likes, details, imgs, model, venduto),
-                                            link
-                                        )
-                                        time.sleep(2)
-                
-                                    except Exception as e:
-                                        print("❌ Errore annuncio:", link, "|", e)
-                
-                            except Exception as e:
-                                print("❌ Errore lista:", e)
-                
-                            if found:
-                                print(f"✅ Trovati: {found} annunci validi")
-                            else:
-                                print("🛑 Nessun annuncio valido")
-                            print("────────────────────────────────────────────")
-                
-                        save_seen()
-                        if time.time() - last_dash > DASH_INTERVAL:
-                            send_dash(all_ann)
-                        time.sleep(60)
+
+                for link in links:
+                    if link in seen or link in discarded:
+                        continue
+                    try:
+                        price, cond, city, date, likes, details, imgs, model, venduto = extract(link)
+
+                        if s["label"].lower() != model.lower():
+                            continue
+
+                        parsed = parse_date(date)
+                        if parsed and (datetime.now() - parsed).days > 2:
+                            continue
+
+                        if not (s["min"] <= price <= s["max"]):
+                            continue
+
+                        seen.add(link)
+                        found += 1
+                        if not any(a["link"] == link for a in all_ann):
+                            all_ann.append({
+                                "label": model,
+                                "price": price,
+                                "city": city,
+                                "link": link,
+                                "likes": likes
+                            })
+
+                        send_announcement(
+                            (price, cond, city, date, likes, details, imgs, model, venduto),
+                            link
+                        )
+                        time.sleep(2)
+
+                    except Exception as e:
+                        print("❌ Errore annuncio:", link, "|", e)
+
+            except Exception as e:
+                print("❌ Errore lista:", e)
+
+            if found:
+                print(f"✅ Trovati: {found} annunci validi")
+            else:
+                print("🛑 Nessun annuncio valido")
+            print("────────────────────────────────────────────")
+
+        save_seen()
+        if time.time() - last_dash > DASH_INTERVAL:
+            send_dash(all_ann)
+        time.sleep(60)
       
 def reset_data(update, context):
     global saved, discarded, seen, all_ann
