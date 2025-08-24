@@ -18,6 +18,12 @@ import re
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 import re, os, time
+from urllib.parse import urljoin
+try:
+    from playwright_stealth import stealth_sync
+except Exception:
+    stealth_sync = None
+
 
 def _click_cookies(page):
     try:
@@ -43,37 +49,54 @@ def _click_cookies(page):
 
 def fetch_html_browser(url: str, wait_ms: int = 2500, scrolls: int = 2) -> str:
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # Avvia come browser "vero" (headed); lo lanceremo sotto Xvfb sulla VM
+        browser = p.chromium.launch(
+            headless=False,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
         ctx = browser.new_context(
             locale="it-IT",
             timezone_id="Europe/Rome",
-            viewport={"width": 1280, "height": 1800},
+            viewport={"width": 1366, "height": 768},
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+            ),
+            extra_http_headers={"Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"},
         )
         page = ctx.new_page()
-        page.goto(url, wait_until="networkidle", timeout=60000)  # aspetta richieste rete finite
-        _click_cookies(page)
-        page.wait_for_timeout(wait_ms)
+        if stealth_sync:
+            stealth_sync(page)  # rimuove navigator.webdriver, ecc.
 
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        _click_cookies(page)
+        page.wait_for_timeout(1000)
+
+        # Scorri un po' per far caricare le card
         for _ in range(scrolls):
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.mouse.wheel(0, 2000)
             page.wait_for_timeout(1200)
 
-        # aspetta che compaiano i link ai dettagli (terminano in .htm)
+        # Attendi quiete rete
         try:
-            page.wait_for_selector("a[href$='.htm']", timeout=5000)
-        except Exception:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except:
             pass
 
+        # Debug utili + HTML finale
         html = page.content()
-
-        # debug utili (li hai già visti in /tmp/subito-debug)
         try:
             os.makedirs("/tmp/subito-debug", exist_ok=True)
             stamp = str(int(time.time()))
             page.screenshot(path=f"/tmp/subito-debug/list_{stamp}.png", full_page=True)
             with open(f"/tmp/subito-debug/list_{stamp}.html", "w", encoding="utf-8") as f:
                 f.write(html)
-        except Exception:
+            print("DEBUG: title =", page.title())
+        except:
             pass
 
         ctx.close()
